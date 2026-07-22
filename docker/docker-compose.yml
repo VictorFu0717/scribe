@@ -1,0 +1,54 @@
+# Qwen3-ASR 定稿服務 (vLLM, OpenAI 相容端點) — 給 main.py 的 _finalize_qwen 呼叫
+#
+# 用法:
+#   cd docker
+#   docker compose up -d          # 起服務 (第一次會 build)
+#   docker compose logs -f        # 看載入進度
+#   curl http://localhost:8000/health
+#   docker compose down           # 停
+#
+# 前置 (Linux host): 安裝 NVIDIA driver + nvidia-container-toolkit
+#   https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
+# Windows: 用 Docker Desktop (WSL2 後端) 並在設定開啟 GPU;driver 需支援 WSL。
+
+services:
+  vllm-qwen3-asr:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # 若確認官方 image 已含音訊依賴,可改成直接用 image、拿掉上面的 build:
+    # image: vllm/vllm-openai:v0.14.0
+    container_name: vllm-qwen3-asr
+    restart: unless-stopped
+    ports:
+      - "9000:8000"
+    volumes:
+      # 重用 host 上已下載的 HuggingFace 快取,避免容器重抓 ~3.5GB 模型
+      - ${HF_CACHE:-${HOME}/.cache/huggingface}:/root/.cache/huggingface
+    environment:
+      - HF_HUB_OFFLINE=0
+      # - HF_TOKEN=${HF_TOKEN}      # 只有私有/受限模型才需要
+    # vLLM 建議:共享記憶體給 NCCL / tensor 並行用
+    ipc: host
+    # entrypoint 已是 qwen-asr-serve(= 註冊 qwen3_asr 後轉呼 vllm serve),
+    # 故這裡直接給 serve 的參數;模型用位置參數(--model 已被 vLLM 標記淘汰)
+    command: >
+      Qwen/Qwen3-ASR-1.7B
+      --served-model-name Qwen/Qwen3-ASR-1.7B
+      --port 8000
+      --gpu-memory-utilization 0.2
+      --enforce-eager
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all          # 只用某張卡可改成 count: 1 或 device_ids: ["0"]
+              capabilities: [gpu]
+    healthcheck:
+      # vLLM image 不保證有 curl,用 python 檢查
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\" || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 240s          # 首次載入模型較久

@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# venv
+.venv/
+venv/
+env/
+
+# 本機設定 / 密鑰(勿上傳)
+.claude/
+.env
+*.env
+!.env.example
+*.key
+secrets.*
+
+# 日誌 / 暫存
+*.log
+*.tmp
+tmp/
+scratch/
+
+# 模型 / 資料快取(體積大,不入庫)
+*.pt
+*.bin
+*.safetensors
+models/
+data/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
