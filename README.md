@@ -28,7 +28,16 @@
 **為什麼這樣切**：Qwen3-ASR 的「串流」API 不支援 batch、無法併發；因此
 - **即時預覽**用輕量的 FunASR paraformer-streaming（本地、低延遲）；
 - **定稿**丟給 `vllm serve` 的 Qwen3-ASR，vLLM 做 continuous batching → **真併發**；
-- 多條 WebSocket 連線由 async 單行程同時服務（`workers=1` 是刻意的：模型只載一份）。
+### 併發模型（為什麼 `workers=1` 仍能同時服務多人）
+
+`workers=1` 指的是「**單一 process、模型只載一份**」，**不是**一次只能處理一個請求：
+
+- 單一 **async event loop** 可同時 juggle 多條 WebSocket 連線（每條各自維護狀態）。
+- 逐字預覽 / VAD 是本地小模型呼叫，以一把鎖序列化，但每次 ~毫秒級，不是瓶頸。
+- **定稿**是 async 打到 vLLM → vLLM 做 **continuous batching**，跨所有連線**真併發**。
+
+開更多 worker 反而**有害**：每個 worker 會各載一份 FunASR 模型、VRAM 翻倍；GPU 才是瓶頸，
+不是 web 層。要再擴充併發是加大 vLLM（或多卡 / 多 vLLM 實例），不是加 uvicorn worker。
 
 ---
 
@@ -74,14 +83,19 @@ cd ~/PycharmProjects/websocket_ASR
 ### ① 即時轉錄 — `WS /ws/asr`
 ```
 Client → Server:
-  binary            PCM16 LE mono 16k 音訊
-  {"type":"end"}    結束本段,等所有句子定稿後回 final
-  {"type":"reset"}  丟棄狀態重來
+  binary                              PCM16 LE mono 16k 音訊
+  {"type":"config","diarization":true} 開/關說話者辨識(開啟時 server 才 lazy-load 語者模型)
+  {"type":"end"}                       結束本段,等所有句子定稿後回 final
+  {"type":"reset"}                     丟棄狀態重來
 Server → Client (JSON):
-  {"type":"partial","committed":..,"tentative":..,"text":..}   committed=已定稿句,tentative=即時灰字
-  {"type":"final","text":..}
+  {"type":"partial","committed":..,"tentative":..,"text":..,"diarization":bool,
+   "segments":[{"speaker":"說話者1","text":..}, ...]}   committed=已定稿句,tentative=即時灰字
+  {"type":"final","text":..,"segments":[...]}
+  {"type":"config","diarization":bool}                  config 回覆
   {"type":"error","detail":..}
 ```
+> **說話者辨識**：可開關、用到才載入（不開＝零 VRAM）。開啟後每句定稿會標上「說話者N」，
+> `segments` 提供結構化結果，`committed`/`final.text` 會加「說話者N：」前綴並逐句換行。
 
 ### ③ 單場會議問答 — `POST /meeting/chat`（SSE 串流）
 ```
@@ -108,6 +122,11 @@ body: {"transcript":"逐字稿全文","question":"問題","history":[{"role","co
 | `FUNASR_HUB` | `hf` | FunASR 下載來源（`hf`/`ms`）|
 | `ASR_TRADITIONAL` | `1` | 簡→繁台灣用語轉換 |
 | `MAX_SEG_SEC` | `30` | 連續講不停的安全切段秒數 |
+| `DIARIZE` | `0` | 說話者辨識是否預設開（通常由 app 用 config 訊息控制）|
+| `SPK_MODEL` | `funasr/campplus` | 語者向量模型;ERes2NetV2 用 `iic/speech_eres2netv2_sv_zh-cn_16k-common` |
+| `SPK_HUB` | 同 `FUNASR_HUB` | 語者模型下載來源（ERes2NetV2 在 ModelScope 需設 `ms`）|
+| `SPK_THRESHOLD` | `0.5` | 同語者 cosine 門檻（越高越嚴、越容易判成新語者）|
+| `SPK_PREFIX` | `說話者` | 語者標籤前綴 |
 | `PORT` | `8005` | scribe 埠 |
 
 ---
@@ -132,6 +151,7 @@ body: {"transcript":"逐字稿全文","question":"問題","history":[{"role","co
 ## Roadmap
 
 - [x] ① 即時 ASR（逐字 + 定稿 + 繁體 + 併發）
+- [x] 說話者辨識（可開關、lazy-load;CAM++/ERes2NetV2 + 線上分群）
 - [x] ③ 單場會議 QA（grounding 在逐字稿）
 - [ ] ② 會議儲存 + 自動統整（摘要 / 待辦 / 決議）
 - [ ] ④ RAG 個人助手：逐字稿依 `user_id` 存向量DB，跨會議問答（「上週待辦」「上個月5號重點」）

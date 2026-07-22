@@ -69,6 +69,8 @@ import soundfile as sf
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
+from diarize import SpeakerClusterer
+
 # --- 設定 ------------------------------------------------------------------
 VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "http://localhost:9000/v1")
 VLLM_API_KEY = os.getenv("VLLM_API_KEY", "EMPTY")
@@ -83,6 +85,16 @@ ASR_LANG = os.getenv("ASR_LANG") or None
 MAX_SEG_SEC = float(os.getenv("MAX_SEG_SEC", "30"))
 # 簡->繁(台灣用語)轉換:預覽(paraformer 只輸出簡體)與定稿都會過一次
 ASR_TW = os.getenv("ASR_TRADITIONAL", "1") not in ("0", "false", "False", "")
+
+# --- 說話者辨識(可開關;用到才 lazy-load,不啟用則零 VRAM 佔用)---
+# 預設關;由 client 送 {"type":"config","diarization":true} 或 DIARIZE=1 開啟。
+DIARIZE_DEFAULT = os.getenv("DIARIZE", "0") in ("1", "true", "True")
+# 語者向量模型:預設 CAM++(HF);ERes2NetV2 較準較重,可用 ModelScope:
+#   SPK_MODEL=iic/speech_eres2netv2_sv_zh-cn_16k-common  SPK_HUB=ms
+SPK_MODEL = os.getenv("SPK_MODEL", "funasr/campplus")
+SPK_HUB = os.getenv("SPK_HUB", FUNASR_HUB)
+SPK_THRESHOLD = float(os.getenv("SPK_THRESHOLD", "0.5"))   # cosine 門檻(同語者 ~0.67+)
+SPK_PREFIX = os.getenv("SPK_PREFIX", "說話者")
 
 SAMPLE_RATE = 16000                 # 協定固定 16k;client 需自行 resample
 
@@ -99,7 +111,9 @@ _pf_model = None      # 即時預覽
 _vad_model = None     # 斷句
 _oai = None           # 定稿用的 async OpenAI client(打 vllm serve)
 _cc = None            # OpenCC s2twp 轉換器(簡->繁台灣)
+_spk_model = None     # 語者向量模型(lazy-load,啟用說話者辨識才載入)
 _funasr_lock = asyncio.Lock()
+_spk_load_lock = asyncio.Lock()   # 保護 _spk_model 的 lazy-load
 
 
 def _to_tw(text: str) -> str:
@@ -197,6 +211,34 @@ async def _finalize_qwen(seg: np.ndarray) -> str:
     return _clean_qwen(getattr(resp, "text", "") or "")
 
 
+async def _get_spk_model():
+    """lazy-load 語者向量模型(第一次啟用說話者辨識時才載入,之後所有連線共用)。"""
+    global _spk_model
+    if _spk_model is None:
+        async with _spk_load_lock:
+            if _spk_model is None:
+                from funasr import AutoModel
+                loop = asyncio.get_running_loop()
+                print(f"[diarize] loading speaker model {SPK_MODEL} (hub={SPK_HUB}) ...")
+                _spk_model = await loop.run_in_executor(
+                    None,
+                    lambda: AutoModel(model=SPK_MODEL, hub=SPK_HUB, device=DEVICE,
+                                      disable_update=True),
+                )
+                print("[diarize] speaker model ready.")
+    return _spk_model
+
+
+async def _spk_embed(audio: np.ndarray) -> np.ndarray:
+    """算一段音訊的語者向量(192 維);與其他 FunASR 呼叫共用同一把鎖。"""
+    model = await _get_spk_model()
+    loop = asyncio.get_running_loop()
+    async with _funasr_lock:
+        res = await loop.run_in_executor(
+            None, lambda: model.generate(input=audio.astype(np.float32)))
+    return res[0]["spk_embedding"].detach().cpu().numpy().ravel()
+
+
 @app.websocket("/ws/asr")
 async def ws_asr(ws: WebSocket):
     await ws.accept()
@@ -207,8 +249,10 @@ async def ws_asr(ws: WebSocket):
     audio_buf = np.zeros(0, dtype=np.float32)   # 尚未湊滿一個 chunk 的殘餘
     seg_samples: list[np.ndarray] = []      # 目前這句累積的音訊(給 Qwen 定稿)
     seg_dur = 0.0                           # 目前這句長度(秒)
-    segments: list[str] = []                # 已斷句句子:先放預覽字,Qwen 回來就升級
+    segments: list[dict] = []               # 已斷句句子:{"text","speaker"};先放預覽字,Qwen 升級
     cur_preview = ""                        # 目前這句的即時預覽
+    diarize_on = DIARIZE_DEFAULT            # 說話者辨識(可由 client {"type":"config"} 開關)
+    clusterer = SpeakerClusterer(SPK_THRESHOLD, SPK_PREFIX)   # 本場會議的語者分群狀態
 
     send_lock = asyncio.Lock()              # 避免收發兩邊同時 send
     fin_queue: asyncio.Queue = asyncio.Queue()   # 待定稿佇列 (idx, audio)
@@ -220,15 +264,32 @@ async def ws_asr(ws: WebSocket):
             except Exception:
                 pass
 
+    def _committed_str() -> str:
+        """已定稿句子組成的字串;開了說話者辨識就加「說話者N：」前綴、逐句換行。"""
+        if diarize_on:
+            lines = []
+            for s in segments:
+                spk = s.get("speaker")
+                t = _to_tw(s["text"])
+                lines.append(f"{spk}：{t}" if spk else t)
+            return "\n".join(lines)
+        return _to_tw("".join(s["text"] for s in segments))
+
+    def _seg_list() -> list:
+        return [{"speaker": s.get("speaker"), "text": _to_tw(s["text"])} for s in segments]
+
     async def push_partial():
-        committed = _to_tw("".join(segments))
+        committed = _committed_str()
         tentative = _to_tw(cur_preview)
+        sep = "\n" if (diarize_on and committed and tentative) else ""
         await send({
             "type": "partial",
             "committed": committed,
             "tentative": tentative,
-            "text": committed + tentative,
+            "text": committed + sep + tentative,
             "language": ASR_LANG,
+            "diarization": diarize_on,
+            "segments": _seg_list(),
         })
 
     async def finalizer():
@@ -242,8 +303,14 @@ async def ws_asr(ws: WebSocket):
                 try:
                     text = await _finalize_qwen(seg)
                     if text:
-                        segments[idx] = text
-                        await push_partial()
+                        segments[idx]["text"] = text
+                    if diarize_on and seg.size:
+                        try:
+                            emb = await _spk_embed(seg)
+                            segments[idx]["speaker"] = clusterer.assign(emb)
+                        except Exception as e:
+                            await send({"type": "error", "detail": f"diarize: {e}"})
+                    await push_partial()
                 except Exception as e:
                     await send({"type": "error", "detail": f"finalize: {e}"})
             finally:
@@ -256,7 +323,7 @@ async def ws_asr(ws: WebSocket):
         nonlocal cur_preview, pf_cache, seg_samples, seg_dur
         seg = np.concatenate(seg_samples) if seg_samples else np.zeros(0, np.float32)
         idx = len(segments)
-        segments.append(cur_preview)        # 先用預覽字佔位(committed 立即有字)
+        segments.append({"text": cur_preview, "speaker": None})   # 先用預覽字佔位
         cur_preview = ""
         pf_cache = {}                       # 新的一句 → 預覽 cache 重置
         seg_samples = []
@@ -307,7 +374,7 @@ async def ws_asr(ws: WebSocket):
         await push_partial()
 
     def reset_all():
-        nonlocal pf_cache, vad_cache, audio_buf, seg_samples, seg_dur, cur_preview
+        nonlocal pf_cache, vad_cache, audio_buf, seg_samples, seg_dur, cur_preview, clusterer
         pf_cache = {}
         vad_cache = {}
         audio_buf = np.zeros(0, dtype=np.float32)
@@ -315,6 +382,7 @@ async def ws_asr(ws: WebSocket):
         seg_dur = 0.0
         cur_preview = ""
         segments.clear()
+        clusterer = SpeakerClusterer(SPK_THRESHOLD, SPK_PREFIX)   # 新一輪重置語者編號
 
     try:
         while True:
@@ -331,6 +399,17 @@ async def ws_asr(ws: WebSocket):
                     continue
 
                 t = ctrl.get("type")
+                if t == "config":
+                    # app 設定:開/關說話者辨識;開啟時就先 lazy-load,避免第一句卡頓
+                    if "diarization" in ctrl:
+                        diarize_on = bool(ctrl["diarization"])
+                        if diarize_on:
+                            try:
+                                await _get_spk_model()
+                            except Exception as e:
+                                await send({"type": "error", "detail": f"diarize load: {e}"})
+                        await send({"type": "config", "diarization": diarize_on})
+                    continue
                 if t == "end":
                     # flush 殘餘音訊 + 讓預覽吐出尾巴
                     if audio_buf.size > 0:
@@ -340,7 +419,7 @@ async def ws_asr(ws: WebSocket):
                     close_segment()
                     # 等所有句子都定稿完成再回 final
                     await fin_queue.join()
-                    await send({"type": "final", "text": _to_tw("".join(segments))})
+                    await send({"type": "final", "text": _committed_str(), "segments": _seg_list()})
                     reset_all()
                 elif t == "reset":
                     reset_all()
