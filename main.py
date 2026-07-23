@@ -22,6 +22,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import config, db, models
+from app.assistant import router as assistant_router
 from app.chat_qa import router as qa_router
 from app.routers.meetings import router as meetings_router
 from app.summarize import router as summary_router
@@ -50,6 +51,7 @@ app.include_router(ws_router)
 app.include_router(meetings_router)
 app.include_router(summary_router)
 app.include_router(upload_router)
+app.include_router(assistant_router)
 app.include_router(qa_router)
 
 

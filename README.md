@@ -117,13 +117,21 @@ Server → Client (JSON):
 > **說話者辨識**：可開關、用到才載入（不開＝零 VRAM）。開啟後每句定稿會標上「說話者N」，
 > `segments` 提供結構化結果，`committed`/`final.text` 會加「說話者N：」前綴並逐句換行。
 
-### ③ 單場會議問答 — `POST /meeting/chat`（SSE 串流）
+### ⑤ agentic 助理 — `POST /assistant/chat`（SSE 串流）
+```
+body: {"messages":[{"role","content"}...], "meeting_id":str|null, "language":"zh-Hant"}
+回傳(text/event-stream): data: {"delta":"..."}  ...  data: [DONE]
+```
+> 手寫 **agent loop**:LLM 自行決定是否呼叫工具(多輪),最後串流答案。工具:
+> `get_meeting_transcript` / `get_meeting_summary` / `list_meetings` / `search_meetings`(關鍵字,⑥ 升級語意)。
+> 帶 `meeting_id` → 以該場為「目前會議」;不帶 → 可跨會議檢索。工具註冊表好擴充(加工具 = 加 schema + handler)。
+
+### ③ 單場會議問答（舊）— `POST /meeting/chat`（SSE 串流）
 ```
 body: {"transcript":"逐字稿全文","question":"問題","history":[{"role","content"}...]}
 回傳(text/event-stream): data: {"delta":"..."}  ...  data: [DONE]
 ```
-> 逐字稿目前為 **stateless**（由 client 帶入）；context 上限 16384，長會議需靠 RAG（見 Roadmap ⑥）。
-> agentic 助理端點 `POST /assistant/chat`（用 `meeting_id` 由 server 取逐字稿 + 工具）為 ⑤，待實作。
+> stateless(client 帶逐字稿)。已由 ⑤ `/assistant/chat` 取代(server 用 meeting_id 自取 + 工具);此端點保留相容。
 
 ### 會議 CRUD + 儲存（①②③）
 存於 SQLite（`scribe.db`），皆掛 `user_id`（多租戶）。開發期以 `X-User-Id` header 指定使用者（預設 `dev`）。
@@ -217,6 +225,7 @@ body: {"language":"zh-Hant"}   (可省略)
 - [x] **② 定稿寫入**（WS 帶 `meeting_id` → 定稿存入、status=ready、duration）
 - [x] **③ 會議 CRUD**（`/meetings` 系列端點）
 - [x] **④ 摘要**（`POST /meetings/{id}/summarize`，SSE + 結構化 JSON，長逐字稿 map-reduce）
-- [ ] **⑤ agentic 助理**（`POST /assistant/chat`，工具:search_meetings / get_transcript / get_summary）
-- [ ] **⑥ RAG**（sqlite-vec + embedding，跨會議「上週待辦」「上個月5號重點」）
+- [x] **⑤ agentic 助理**（`POST /assistant/chat`，手寫 loop + 工具:get_transcript/get_summary/list/search）
+- [ ] **⑥ RAG**（把 search_meetings 從關鍵字升級成 sqlite-vec + embedding 語意檢索）
+- [x] 整段錄音上傳轉錄（`POST /meetings/{id}/audio`，背景批次）
 - [ ] **⑦ 登入**（`POST /auth/token`）+ diarization 指定人數

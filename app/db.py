@@ -130,6 +130,23 @@ async def get_transcript(user_id: str, mid: str) -> list[dict] | None:
                 for r in await cur.fetchall()]
 
 
+async def search_transcripts(user_id: str, query: str, limit: int = 8) -> list[dict]:
+    """跨會議關鍵字搜尋(⑤ 前哨;⑥ 會升級成語意檢索)。回傳含 meeting_id/title/snippet。"""
+    q = (query or "").strip()
+    if not q:
+        return []
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT s.meeting_id, m.title, m.created_at, s.text "
+            "FROM transcript_segments s JOIN meetings m ON m.id = s.meeting_id "
+            "WHERE m.user_id = ? AND s.text LIKE ? ORDER BY m.created_at DESC LIMIT ?",
+            (user_id, f"%{q}%", limit))
+        return [{"meeting_id": r["meeting_id"], "title": r["title"],
+                 "created_at": r["created_at"], "snippet": r["text"]}
+                for r in await cur.fetchall()]
+
+
 async def get_transcript_text(mid: str) -> str:
     """整場逐字稿純文字(帶說話者前綴);給 ④摘要 / ⑤QA 用。"""
     async with aiosqlite.connect(config.DB_PATH) as db:
