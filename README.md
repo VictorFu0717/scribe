@@ -171,6 +171,17 @@ body: {"language":"zh-Hant"}   (可省略)
 > 先串流 Markdown 供顯示,串完解析成結構化 JSON、存入 DB(之後 `GET .../summary` 可取)。
 > 長逐字稿自動 **map-reduce**(分段濃縮再合併)。摘要會存檔並把會議 `has_summary` 設為 true。
 
+### ⑦ 登入 — JWT bearer
+```
+POST /auth/register   {"username","password"}                      → {access_token,token_type,expires_in,user_id,username}
+POST /auth/token      form: grant_type=password&username=&password= → 同上(OAuth2 標準)
+GET  /auth/me         Authorization: Bearer <jwt>                   → 目前使用者
+```
+> 之後所有端點以 `Authorization: Bearer <jwt>` 認身分(多租戶 user_id 由 token 解出);
+> WS 可用 `?token=`、`Authorization` header 或 `config` 訊息帶 `token`。
+> **開發期**(`AUTH_REQUIRED=false`,預設):沒帶 token 退回 `X-User-Id`/`DEFAULT_USER`(app「略過登入」照常);
+> `/auth/token` 遇未知帳號自動註冊。**正式**(`AUTH_REQUIRED=true`):所有端點強制 token,沒帶 401。
+
 ### `GET /health`
 回傳各模型載入狀態。
 
@@ -191,6 +202,9 @@ body: {"language":"zh-Hant"}   (可省略)
 | `EMBED_MODEL` | `bge-m3` | Embedding 模型（1024 維）|
 | `EMBED_DIM` | `1024` | 向量維度（換模型要一起改）|
 | `RAG_CHUNK_CHARS` | `400` | 逐字稿切塊字元數 |
+| `AUTH_SECRET` | `dev-insecure...` | JWT 簽章密鑰（**正式務必覆寫**,>=32 bytes）|
+| `AUTH_TTL` | `43200` | token 有效秒數（12h）|
+| `AUTH_REQUIRED` | `0` | `1`=所有端點強制 Bearer;`0`=開發期沒帶退回 `X-User-Id`/`DEFAULT_USER` |
 | `UPLOAD_MAX_SEG_SEC` | `30` | 上傳轉錄:過長 VAD 段的再切秒數 |
 | `UPLOAD_CONCURRENCY` | `8` | 上傳轉錄:同時打 Qwen3-ASR 的段數上限 |
 | `STREAM_MODEL` / `VAD_MODEL` | `paraformer-zh-streaming` / `fsmn-vad` | 預覽 / 斷句模型 |
@@ -233,4 +247,5 @@ body: {"language":"zh-Hant"}   (可省略)
 - [x] **⑤ agentic 助理**（`POST /assistant/chat`，手寫 loop + 工具:get_transcript/get_summary/list/search）
 - [x] **⑥ RAG**（sqlite-vec + bge-m3 語意檢索;定稿/上傳後自動索引;多租戶 user_id 分區 + 日期過濾）
 - [x] 整段錄音上傳轉錄（`POST /meetings/{id}/audio`，背景批次）
-- [ ] **⑦ 登入**（`POST /auth/token`）+ diarization 指定人數
+- [x] **⑦ 登入**（`POST /auth/token` OAuth2→JWT;多租戶身分由 token 解出;dev 可略過/正式強制）
+- [ ] diarization 指定人數（`speaker_count`;上傳路徑 K 群聚類,選配）

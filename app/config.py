@@ -46,7 +46,15 @@ RAG_CHUNK_CHARS = int(os.getenv("RAG_CHUNK_CHARS", "400"))   # 逐字稿切塊�
 # --- 儲存 ---
 DB_PATH = os.getenv("SCRIBE_DB", "scribe.db")
 
-# --- 開發期多租戶佔位(auth ⑦ 之前;之後改由 token 解出 user_id)---
+# --- 認證 (⑦, JWT bearer) ---
+AUTH_SECRET = os.getenv("AUTH_SECRET", "dev-insecure-secret-change-me-in-production-please")   # 正式務必用環境變數覆寫(>=32 bytes)
+AUTH_ALGO = "HS256"
+AUTH_TTL = int(os.getenv("AUTH_TTL", "43200"))     # token 有效秒數(預設 12h)
+# false(開發):端點不強制 token,沒帶就退回 X-User-Id / DEFAULT_USER;/auth/token 未知帳號自動註冊
+# true (正式):所有端點強制 Bearer,沒帶 401;不自動註冊
+AUTH_REQUIRED = os.getenv("AUTH_REQUIRED", "0") in ("1", "true", "True")
+
+# --- 開發期多租戶佔位(AUTH_REQUIRED=false 時的退回身分)---
 DEFAULT_USER = os.getenv("DEFAULT_USER", "dev")
 
 PORT = int(os.getenv("PORT", "8005"))

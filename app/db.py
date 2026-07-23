@@ -59,6 +59,9 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS summaries(
                 meeting_id TEXT PRIMARY KEY, data TEXT, created_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS users(
+                id TEXT PRIMARY KEY, username TEXT UNIQUE, password_hash TEXT, created_at TEXT
+            );
             CREATE INDEX IF NOT EXISTS idx_meetings_user ON meetings(user_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_seg_meeting ON transcript_segments(meeting_id, seq);
             CREATE TABLE IF NOT EXISTS chunks(
@@ -86,6 +89,36 @@ def _meeting_row(r) -> dict:
         "duration_sec": r["duration_sec"], "status": r["status"],
         "has_summary": bool(r["has_summary"]), "audio_url": None,
     }
+
+
+# ---- users (⑦ auth;儲存層只存,雜湊在 app/auth.py) ----
+async def create_user(user_id: str, username: str, password_hash: str) -> dict:
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO users(id,username,password_hash,created_at) VALUES(?,?,?,?)",
+            (user_id, username, password_hash, _now()))
+        await db.commit()
+    return {"id": user_id, "username": username}
+
+
+async def get_user_by_username(username: str) -> dict | None:
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM users WHERE username=?", (username,))
+        r = await cur.fetchone()
+        return dict(r) if r else None
+
+
+async def get_user_by_id(user_id: str) -> dict | None:
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT id,username,created_at FROM users WHERE id=?", (user_id,))
+        r = await cur.fetchone()
+        return dict(r) if r else None
+
+
+def new_user_id() -> str:
+    return _new_id()
 
 
 # ---- meetings ----

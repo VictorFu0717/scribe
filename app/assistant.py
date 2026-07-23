@@ -14,11 +14,12 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Header
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app import config, db, llm, rag
+from app.auth import get_current_user
 
 router = APIRouter(tags=["assistant"])
 
@@ -59,10 +60,6 @@ SYSTEM = (
     "- 若某場會議「摘要尚未產生」,改用 get_meeting_transcript 取逐字稿來回答,不要因為沒有摘要就放棄。\n"
     "- 回答精簡、切中重點,必要時條列。"
 )
-
-
-def _uid(x):
-    return x or config.DEFAULT_USER
 
 
 async def _run_tool(name: str, args_str: str, user: str) -> str:
@@ -107,8 +104,7 @@ def _sse(obj) -> str:
 
 
 @router.post("/assistant/chat")
-async def assistant_chat(req: AssistantReq, x_user_id: str | None = Header(default=None)):
-    user = _uid(x_user_id)
+async def assistant_chat(req: AssistantReq, user: str = Depends(get_current_user)):
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     sys = SYSTEM + (f"\n\n今天是 {today}。若使用者用相對時間(如「上週」「上個月5號」),"
                     f"請自行換算成 date_from/date_to(YYYY-MM-DD)傳給 search_meetings。")

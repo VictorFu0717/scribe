@@ -23,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app import config, db, models
 from app.assistant import router as assistant_router
+from app.auth import router as auth_router
 from app.chat_qa import router as qa_router
 from app.routers.meetings import router as meetings_router
 from app.summarize import router as summary_router
@@ -47,6 +48,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth_router)
 app.include_router(ws_router)
 app.include_router(meetings_router)
 app.include_router(summary_router)

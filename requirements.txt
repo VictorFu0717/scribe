@@ -22,3 +22,7 @@ OpenCC==1.4.1                  # 簡->繁台灣用語
 # 儲存 / RAG
 aiosqlite==0.22.1
 sqlite-vec==0.1.9              # SQLite 向量檢索 (⑥ RAG)
+
+# 認證 (⑦)
+PyJWT==2.13.0
+bcrypt==5.0.0

@@ -17,10 +17,11 @@ import os
 
 import librosa
 import numpy as np
-from fastapi import (APIRouter, BackgroundTasks, File, Form, Header,
+from fastapi import (APIRouter, BackgroundTasks, Depends, File, Form,
                      HTTPException, UploadFile)
 
 from app import config, db, models, rag
+from app.auth import get_current_user
 from app.diarize import SpeakerClusterer
 
 router = APIRouter(tags=["upload"])
@@ -28,10 +29,6 @@ router = APIRouter(tags=["upload"])
 MAX_SEG_MS = int(float(os.getenv("UPLOAD_MAX_SEG_SEC", "30")) * 1000)   # 過長 VAD 段再切
 CONCURRENCY = int(os.getenv("UPLOAD_CONCURRENCY", "8"))                 # 同時打 Qwen3-ASR 上限
 SR = config.SAMPLE_RATE
-
-
-def _uid(x):
-    return x or config.DEFAULT_USER
 
 
 def _load_audio(raw: bytes) -> np.ndarray:
@@ -104,8 +101,7 @@ async def _process(mid: str, user: str, audio: np.ndarray, diarize: bool):
 async def upload_audio(mid: str, background_tasks: BackgroundTasks,
                        file: UploadFile = File(...),
                        diarization: bool = Form(False),
-                       x_user_id: str | None = Header(default=None)):
-    user = _uid(x_user_id)
+                       user: str = Depends(get_current_user)):
     if await db.get_meeting(user, mid) is None:
         raise HTTPException(404, "meeting not found")
 
