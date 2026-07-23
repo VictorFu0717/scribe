@@ -1,0 +1,162 @@
+"""SQLite 儲存層(aiosqlite)。
+
+三張表,皆掛 user_id + meeting_id(多租戶,RAG 檢索靠 user_id 隔離):
+  meetings             會議 metadata
+  transcript_segments  逐字稿片段
+  summaries            結構化摘要(④ 用)
+之後接 RAG(⑥)時同一個 SQLite 檔用 sqlite-vec 加向量表即可,不需搬遷。
+"""
+
+from __future__ import annotations
+
+import json
+import uuid
+from datetime import datetime, timezone
+
+import aiosqlite
+
+from app import config
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _new_id() -> str:
+    return uuid.uuid4().hex[:12]
+
+
+async def init_db():
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS meetings(
+                id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT,
+                created_at TEXT, duration_sec INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'recording', has_summary INTEGER DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS transcript_segments(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, meeting_id TEXT NOT NULL,
+                seq INTEGER, text TEXT, speaker TEXT, start_ms INTEGER, end_ms INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS summaries(
+                meeting_id TEXT PRIMARY KEY, data TEXT, created_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_meetings_user ON meetings(user_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_seg_meeting ON transcript_segments(meeting_id, seq);
+            """
+        )
+        await db.commit()
+    print(f"[db] ready: {config.DB_PATH}")
+
+
+def _meeting_row(r) -> dict:
+    return {
+        "id": r["id"], "title": r["title"], "created_at": r["created_at"],
+        "duration_sec": r["duration_sec"], "status": r["status"],
+        "has_summary": bool(r["has_summary"]), "audio_url": None,
+    }
+
+
+# ---- meetings ----
+async def create_meeting(user_id: str, title: str | None) -> dict:
+    mid = _new_id()
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO meetings(id,user_id,title,created_at) VALUES(?,?,?,?)",
+            (mid, user_id, title or "未命名會議", _now()))
+        await db.commit()
+    return await get_meeting(user_id, mid)
+
+
+async def list_meetings(user_id: str) -> list[dict]:
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM meetings WHERE user_id=? ORDER BY created_at DESC", (user_id,))
+        return [_meeting_row(r) for r in await cur.fetchall()]
+
+
+async def get_meeting(user_id: str, mid: str) -> dict | None:
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM meetings WHERE user_id=? AND id=?", (user_id, mid))
+        r = await cur.fetchone()
+        return _meeting_row(r) if r else None
+
+
+async def delete_meeting(user_id: str, mid: str) -> bool:
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        cur = await db.execute("DELETE FROM meetings WHERE user_id=? AND id=?", (user_id, mid))
+        await db.execute("DELETE FROM transcript_segments WHERE meeting_id=?", (mid,))
+        await db.execute("DELETE FROM summaries WHERE meeting_id=?", (mid,))
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def set_status(mid: str, status: str, duration_sec: int | None = None):
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        if duration_sec is None:
+            await db.execute("UPDATE meetings SET status=? WHERE id=?", (status, mid))
+        else:
+            await db.execute("UPDATE meetings SET status=?, duration_sec=? WHERE id=?",
+                             (status, duration_sec, mid))
+        await db.commit()
+
+
+# ---- transcript ----
+async def save_transcript(mid: str, segments: list[dict]):
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        await db.execute("DELETE FROM transcript_segments WHERE meeting_id=?", (mid,))
+        await db.executemany(
+            "INSERT INTO transcript_segments(meeting_id,seq,text,speaker,start_ms,end_ms) "
+            "VALUES(?,?,?,?,?,?)",
+            [(mid, i, s.get("text", ""), s.get("speaker"),
+              s.get("start_ms"), s.get("end_ms")) for i, s in enumerate(segments)])
+        await db.commit()
+
+
+async def get_transcript(user_id: str, mid: str) -> list[dict] | None:
+    if await get_meeting(user_id, mid) is None:
+        return None
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM transcript_segments WHERE meeting_id=? ORDER BY seq", (mid,))
+        return [{"id": f"s{r['seq']}", "text": r["text"], "speaker": r["speaker"],
+                 "is_final": True, "start_ms": r["start_ms"], "end_ms": r["end_ms"]}
+                for r in await cur.fetchall()]
+
+
+async def get_transcript_text(mid: str) -> str:
+    """整場逐字稿純文字(帶說話者前綴);給 ④摘要 / ⑤QA 用。"""
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM transcript_segments WHERE meeting_id=? ORDER BY seq", (mid,))
+        rows = await cur.fetchall()
+    lines = [f"{r['speaker']}：{r['text']}" if r["speaker"] else r["text"] for r in rows]
+    return "\n".join(lines)
+
+
+# ---- summary (④ 用;先備好介面) ----
+async def save_summary(mid: str, data: dict):
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO summaries(meeting_id,data,created_at) VALUES(?,?,?) "
+            "ON CONFLICT(meeting_id) DO UPDATE SET data=excluded.data, created_at=excluded.created_at",
+            (mid, json.dumps(data, ensure_ascii=False), _now()))
+        await db.execute("UPDATE meetings SET has_summary=1 WHERE id=?", (mid,))
+        await db.commit()
+
+
+async def get_summary(user_id: str, mid: str) -> dict | None:
+    if await get_meeting(user_id, mid) is None:
+        return None
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT data FROM summaries WHERE meeting_id=?", (mid,))
+        r = await cur.fetchone()
+        return json.loads(r["data"]) if r else None

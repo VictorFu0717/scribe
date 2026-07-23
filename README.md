@@ -45,9 +45,23 @@
 
 | 服務 | 說明 | 埠 (host) | 啟動方式 |
 |------|------|:---:|----------|
-| **scribe** | 本 server（ASR 邏輯 + QA 端點）| 8005 | `python main.py` |
-| **Qwen3-ASR** | 定稿 vLLM 服務 | 9000 | `docker/`（本 repo）|
-| **Qwen3.6-27B** | 對話 LLM（QA/統整）| 8004 | `~/PycharmProjects/RAG_LangChain/vllm/` |
+| **scribe** | 本 server（ASR + SQLite 儲存 + 會議 CRUD + QA）| 8005 | `python main.py` |
+| **Qwen3-ASR** | 定稿 vLLM 服務（音訊→文字，Ollama 做不了）| 9000 | `docker/`（本 repo）|
+| **對話 LLM** | 摘要/QA/助理；Qwen3.6-27B(vLLM) **或** Ollama `qwen3.6` | 8004 / 11434 | vLLM 或 `ollama serve` |
+
+### 專案結構
+
+```
+main.py                    精簡入口(組裝 app、lifespan、掛路由)
+app/
+├── config.py              所有設定(env)
+├── models.py              本地 ASR/語者 模型 + OpenCC + 定稿呼叫
+├── db.py                  SQLite 儲存(aiosqlite;meetings/transcripts/summaries)
+├── ws.py                  /ws/asr 即時轉錄 + 說話者 + 定稿寫入
+├── routers/meetings.py    會議 CRUD
+├── chat_qa.py             /meeting/chat 單場問答(舊端點)
+└── diarize.py             說話者線上分群
+```
 
 ---
 
@@ -66,12 +80,18 @@
 cd docker && docker compose up -d          # host :9000;首次會 build + 載入模型
 docker compose logs -f                      # 等到 "Application startup complete"
 
-# 2) 對話 LLM:Qwen3.6-27B (vLLM) — 在另一個 repo
+# 2) 對話 LLM(擇一)
+#    a) vLLM Qwen3.6-27B(另一個 repo):
 cd ~/PycharmProjects/RAG_LangChain/vllm && docker compose up -d   # host :8004
+#    b) 或用 Ollama(較省事):
+ollama serve && ollama pull qwen3.6        # host :11434
 
 # 3) scribe 主服務
 cd ~/PycharmProjects/websocket_ASR
-.venv/bin/python main.py                    # :8005
+.venv/bin/python main.py                                   # 用 vLLM 對話(預設 :8004)
+# 若對話用 Ollama:
+CHAT_BASE_URL=http://localhost:11434/v1 CHAT_MODEL=qwen3.6:latest CHAT_API_KEY=ollama \
+  .venv/bin/python main.py                                 # :8005
 
 # 測試:瀏覽器開 test.html(錄音→逐字→定稿→問這場會議)
 ```
@@ -84,14 +104,14 @@ cd ~/PycharmProjects/websocket_ASR
 ```
 Client → Server:
   binary                              PCM16 LE mono 16k 音訊
-  {"type":"config","diarization":true} 開/關說話者辨識(開啟時 server 才 lazy-load 語者模型)
-  {"type":"end"}                       結束本段,等所有句子定稿後回 final
+  {"type":"config","diarization":true,"meeting_id":"<id>"}  開/關語者辨識 + 關聯會議(定稿會寫入此 meeting)
+  {"type":"end"}                       結束本段,定稿(+寫入儲存)後回 final
   {"type":"reset"}                     丟棄狀態重來
 Server → Client (JSON):
   {"type":"partial","committed":..,"tentative":..,"text":..,"diarization":bool,
    "segments":[{"speaker":"說話者1","text":..}, ...]}   committed=已定稿句,tentative=即時灰字
-  {"type":"final","text":..,"segments":[...]}
-  {"type":"config","diarization":bool}                  config 回覆
+  {"type":"final","text":..,"segments":[...],"meeting_id":..}
+  {"type":"config","diarization":bool,"meeting_id":..}   config 回覆
   {"type":"error","detail":..}
 ```
 > **說話者辨識**：可開關、用到才載入（不開＝零 VRAM）。開啟後每句定稿會標上「說話者N」，
@@ -102,7 +122,23 @@ Server → Client (JSON):
 body: {"transcript":"逐字稿全文","question":"問題","history":[{"role","content"}...]}
 回傳(text/event-stream): data: {"delta":"..."}  ...  data: [DONE]
 ```
-> 逐字稿目前為 **stateless**（由 client 帶入）；context 上限 16384，長會議需靠 RAG（見 Roadmap ④）。
+> 逐字稿目前為 **stateless**（由 client 帶入）；context 上限 16384，長會議需靠 RAG（見 Roadmap ⑥）。
+> agentic 助理端點 `POST /assistant/chat`（用 `meeting_id` 由 server 取逐字稿 + 工具）為 ⑤，待實作。
+
+### 會議 CRUD + 儲存（①②③）
+存於 SQLite（`scribe.db`），皆掛 `user_id`（多租戶）。開發期以 `X-User-Id` header 指定使用者（預設 `dev`）。
+
+| 端點 | 說明 |
+|------|------|
+| `POST /meetings` | 建會議（App 開始錄音時），body `{"title"}` → 回 meeting（`status:"recording"`）|
+| `GET /meetings` | 列出使用者的會議 → `{"items":[...]}` |
+| `GET /meetings/{id}` | 單一會議 metadata |
+| `DELETE /meetings/{id}` | 刪除（連帶逐字稿/摘要）→ 204 |
+| `GET /meetings/{id}/transcript` | `{"segments":[{id,text,speaker,is_final,start_ms,end_ms}]}` |
+| `GET /meetings/{id}/summary` | 有摘要回 JSON；沒有回 **404** |
+
+> **② 定稿寫入**：WS `config` 帶 `meeting_id` 後，`end` 定稿完成會把逐字稿 segments 寫入該會議，
+> 並更新 `duration_sec` 與 `status="ready"`。
 
 ### `GET /health`
 回傳各模型載入狀態。
@@ -115,9 +151,11 @@ body: {"transcript":"逐字稿全文","question":"問題","history":[{"role","co
 |------|------|------|
 | `VLLM_BASE_URL` | `http://localhost:9000/v1` | Qwen3-ASR 定稿服務 |
 | `QWEN_MODEL` | `Qwen/Qwen3-ASR-1.7B` | 定稿模型名 |
-| `CHAT_BASE_URL` | `http://localhost:8004/v1` | 對話 LLM 服務 |
-| `CHAT_MODEL` | `Qwen3.6-27B` | 對話模型名 |
-| `CHAT_ENABLE_THINKING` | `0` | 開啟 Qwen3 thinking（QA 預設關,較快）|
+| `CHAT_BASE_URL` | `http://localhost:8004/v1` | 對話 LLM 服務;用 Ollama 設 `http://localhost:11434/v1` |
+| `CHAT_MODEL` | `Qwen3.6-27B` | 對話模型名;Ollama 設 `qwen3.6:latest` |
+| `CHAT_API_KEY` | `EMPTY` | 對話 LLM 金鑰（Ollama 隨意填如 `ollama`）|
+| `SCRIBE_DB` | `scribe.db` | SQLite 資料庫路徑 |
+| `DEFAULT_USER` | `dev` | 開發期預設 user_id（auth ⑦ 前的多租戶佔位）|
 | `STREAM_MODEL` / `VAD_MODEL` | `paraformer-zh-streaming` / `fsmn-vad` | 預覽 / 斷句模型 |
 | `FUNASR_HUB` | `hf` | FunASR 下載來源（`hf`/`ms`）|
 | `ASR_TRADITIONAL` | `1` | 簡→繁台灣用語轉換 |
@@ -148,11 +186,13 @@ body: {"transcript":"逐字稿全文","question":"問題","history":[{"role","co
 
 ---
 
-## Roadmap
+## Roadmap（依 App HANDOFF 契約）
 
-- [x] ① 即時 ASR（逐字 + 定稿 + 繁體 + 併發）
-- [x] 說話者辨識（可開關、lazy-load;CAM++/ERes2NetV2 + 線上分群）
-- [x] ③ 單場會議 QA（grounding 在逐字稿）
-- [ ] ② 會議儲存 + 自動統整（摘要 / 待辦 / 決議）
-- [ ] ④ RAG 個人助手：逐字稿依 `user_id` 存向量DB，跨會議問答（「上週待辦」「上個月5號重點」）
-      — 需 embedding 模型 + 向量DB（pgvector/Qdrant）+ 時間語意解析
+- [x] 即時 ASR（逐字 + 定稿 + 繁體 + 併發）+ 說話者辨識（可開關、lazy-load）
+- [x] **① SQLite 儲存**（meetings / transcripts / summaries，掛 user_id 多租戶）
+- [x] **② 定稿寫入**（WS 帶 `meeting_id` → 定稿存入、status=ready、duration）
+- [x] **③ 會議 CRUD**（`/meetings` 系列端點）
+- [ ] **④ 摘要**（`POST /meetings/{id}/summarize`，SSE + 結構化 JSON，長逐字稿 map-reduce）
+- [ ] **⑤ agentic 助理**（`POST /assistant/chat`，工具:search_meetings / get_transcript / get_summary）
+- [ ] **⑥ RAG**（sqlite-vec + embedding，跨會議「上週待辦」「上個月5號重點」）
+- [ ] **⑦ 登入**（`POST /auth/token`）+ diarization 指定人數

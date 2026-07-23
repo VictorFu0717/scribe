@@ -35,3 +35,8 @@ data/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# SQLite 資料庫(勿入庫)
+*.db
+*.db-wal
+*.db-shm
