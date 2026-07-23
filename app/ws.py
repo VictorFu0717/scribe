@@ -22,7 +22,7 @@ import json
 import numpy as np
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app import config, db, models
+from app import config, db, models, rag
 from app.diarize import SpeakerClusterer
 
 router = APIRouter()
@@ -177,6 +177,11 @@ async def ws_asr(ws: WebSocket):
             await db.set_status(meeting_id, "ready", int(elapsed_ms / 1000))
         except Exception as e:
             await send({"type": "error", "detail": f"persist: {e}"})
+            return
+        try:
+            await rag.index_meeting(user_id, meeting_id)   # ⑥ 建向量索引
+        except Exception as e:
+            await send({"type": "error", "detail": f"index: {e}"})
 
     try:
         while True:

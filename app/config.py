@@ -36,6 +36,13 @@ CHAT_BASE_URL = os.getenv("CHAT_BASE_URL", "http://localhost:8004/v1")
 CHAT_API_KEY = os.getenv("CHAT_API_KEY", "EMPTY")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "Qwen3.6-27B")
 
+# --- Embedding (⑥ RAG;預設 Ollama bge-m3) ---
+EMBED_BASE_URL = os.getenv("EMBED_BASE_URL", "http://localhost:11434/v1")
+EMBED_API_KEY = os.getenv("EMBED_API_KEY", "ollama")
+EMBED_MODEL = os.getenv("EMBED_MODEL", "bge-m3")
+EMBED_DIM = int(os.getenv("EMBED_DIM", "1024"))
+RAG_CHUNK_CHARS = int(os.getenv("RAG_CHUNK_CHARS", "400"))   # 逐字稿切塊字元數
+
 # --- 儲存 ---
 DB_PATH = os.getenv("SCRIBE_DB", "scribe.db")
 

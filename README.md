@@ -123,8 +123,9 @@ body: {"messages":[{"role","content"}...], "meeting_id":str|null, "language":"zh
 回傳(text/event-stream): data: {"delta":"..."}  ...  data: [DONE]
 ```
 > 手寫 **agent loop**:LLM 自行決定是否呼叫工具(多輪),最後串流答案。工具:
-> `get_meeting_transcript` / `get_meeting_summary` / `list_meetings` / `search_meetings`(關鍵字,⑥ 升級語意)。
-> 帶 `meeting_id` → 以該場為「目前會議」;不帶 → 可跨會議檢索。工具註冊表好擴充(加工具 = 加 schema + handler)。
+> `get_meeting_transcript` / `get_meeting_summary` / `list_meetings` / `search_meetings`(**語意檢索**,可帶日期範圍)。
+> 帶 `meeting_id` → 以該場為「目前會議」;不帶 → 可跨會議。系統會注入「今天日期」,agent 能自行把
+> 「上週/上個月5號」換算成 `date_from/date_to` 傳給 `search_meetings`。工具註冊表好擴充(加工具 = 加 schema + handler)。
 
 ### ③ 單場會議問答（舊）— `POST /meeting/chat`（SSE 串流）
 ```
@@ -184,8 +185,12 @@ body: {"language":"zh-Hant"}   (可省略)
 | `CHAT_BASE_URL` | `http://localhost:8004/v1` | 對話 LLM 服務;用 Ollama 設 `http://localhost:11434/v1` |
 | `CHAT_MODEL` | `Qwen3.6-27B` | 對話模型名;Ollama 設 `qwen3.6:latest` |
 | `CHAT_API_KEY` | `EMPTY` | 對話 LLM 金鑰（Ollama 隨意填如 `ollama`）|
-| `SCRIBE_DB` | `scribe.db` | SQLite 資料庫路徑 |
+| `SCRIBE_DB` | `scribe.db` | SQLite 資料庫路徑（含 sqlite-vec 向量表）|
 | `DEFAULT_USER` | `dev` | 開發期預設 user_id（auth ⑦ 前的多租戶佔位）|
+| `EMBED_BASE_URL` | `http://localhost:11434/v1` | Embedding 服務（預設 Ollama）|
+| `EMBED_MODEL` | `bge-m3` | Embedding 模型（1024 維）|
+| `EMBED_DIM` | `1024` | 向量維度（換模型要一起改）|
+| `RAG_CHUNK_CHARS` | `400` | 逐字稿切塊字元數 |
 | `UPLOAD_MAX_SEG_SEC` | `30` | 上傳轉錄:過長 VAD 段的再切秒數 |
 | `UPLOAD_CONCURRENCY` | `8` | 上傳轉錄:同時打 Qwen3-ASR 的段數上限 |
 | `STREAM_MODEL` / `VAD_MODEL` | `paraformer-zh-streaming` / `fsmn-vad` | 預覽 / 斷句模型 |
@@ -226,6 +231,6 @@ body: {"language":"zh-Hant"}   (可省略)
 - [x] **③ 會議 CRUD**（`/meetings` 系列端點）
 - [x] **④ 摘要**（`POST /meetings/{id}/summarize`，SSE + 結構化 JSON，長逐字稿 map-reduce）
 - [x] **⑤ agentic 助理**（`POST /assistant/chat`，手寫 loop + 工具:get_transcript/get_summary/list/search）
-- [ ] **⑥ RAG**（把 search_meetings 從關鍵字升級成 sqlite-vec + embedding 語意檢索）
+- [x] **⑥ RAG**（sqlite-vec + bge-m3 語意檢索;定稿/上傳後自動索引;多租戶 user_id 分區 + 日期過濾）
 - [x] 整段錄音上傳轉錄（`POST /meetings/{id}/audio`，背景批次）
 - [ ] **⑦ 登入**（`POST /auth/token`）+ diarization 指定人數

@@ -10,10 +10,12 @@
 from __future__ import annotations
 
 import json
+import struct
 import uuid
 from datetime import datetime, timezone
 
 import aiosqlite
+import sqlite_vec
 
 from app import config
 
@@ -24,6 +26,20 @@ def _now() -> str:
 
 def _new_id() -> str:
     return uuid.uuid4().hex[:12]
+
+
+def _pack(vec) -> bytes:
+    return struct.pack("%df" % len(vec), *vec)
+
+
+async def _connect_vec() -> aiosqlite.Connection:
+    """開一個已載入 sqlite-vec 擴充的連線(呼叫端負責 close)。"""
+    conn = await aiosqlite.connect(config.DB_PATH)
+    conn.row_factory = aiosqlite.Row
+    await conn.enable_load_extension(True)
+    await conn.load_extension(sqlite_vec.loadable_path())
+    await conn.enable_load_extension(False)
+    return conn
 
 
 async def init_db():
@@ -45,8 +61,21 @@ async def init_db():
             );
             CREATE INDEX IF NOT EXISTS idx_meetings_user ON meetings(user_id, created_at);
             CREATE INDEX IF NOT EXISTS idx_seg_meeting ON transcript_segments(meeting_id, seq);
+            CREATE TABLE IF NOT EXISTS chunks(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, meeting_id TEXT,
+                seq INTEGER, text TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_chunks_meeting ON chunks(meeting_id);
             """
         )
+        await db.commit()
+        # ⑥ RAG:sqlite-vec 向量表(user_id 分區,rowid = chunks.id)
+        await db.enable_load_extension(True)
+        await db.load_extension(sqlite_vec.loadable_path())
+        await db.enable_load_extension(False)
+        await db.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0("
+            f"user_id text partition key, embedding float[{config.EMBED_DIM}])")
         await db.commit()
     print(f"[db] ready: {config.DB_PATH}")
 
@@ -93,7 +122,70 @@ async def delete_meeting(user_id: str, mid: str) -> bool:
         await db.execute("DELETE FROM transcript_segments WHERE meeting_id=?", (mid,))
         await db.execute("DELETE FROM summaries WHERE meeting_id=?", (mid,))
         await db.commit()
-        return cur.rowcount > 0
+        deleted = cur.rowcount > 0
+    await delete_chunks(mid)   # 連帶刪向量索引
+    return deleted
+
+
+# ---- 向量索引 (⑥ RAG, sqlite-vec) ----
+async def store_chunks(user_id: str, meeting_id: str, chunks: list[dict]):
+    """先刪該會議舊塊,再存入新塊(chunks:{seq,text,embedding})。vec rowid = chunks.id。"""
+    await delete_chunks(meeting_id)
+    conn = await _connect_vec()
+    try:
+        for ch in chunks:
+            cur = await conn.execute(
+                "INSERT INTO chunks(user_id,meeting_id,seq,text) VALUES(?,?,?,?)",
+                (user_id, meeting_id, ch["seq"], ch["text"]))
+            cid = cur.lastrowid
+            await conn.execute(
+                "INSERT INTO vec_chunks(rowid,user_id,embedding) VALUES(?,?,?)",
+                (cid, user_id, _pack(ch["embedding"])))
+        await conn.commit()
+    finally:
+        await conn.close()
+
+
+async def delete_chunks(meeting_id: str):
+    conn = await _connect_vec()
+    try:
+        cur = await conn.execute("SELECT id FROM chunks WHERE meeting_id=?", (meeting_id,))
+        ids = [r[0] for r in await cur.fetchall()]
+        for cid in ids:
+            await conn.execute("DELETE FROM vec_chunks WHERE rowid=?", (cid,))
+        await conn.execute("DELETE FROM chunks WHERE meeting_id=?", (meeting_id,))
+        await conn.commit()
+    finally:
+        await conn.close()
+
+
+async def vector_search(user_id: str, query_emb, k: int = 8) -> list[dict]:
+    """依 user_id 分區做 KNN,回傳 [{meeting_id,title,created_at,snippet,distance}]。"""
+    conn = await _connect_vec()
+    try:
+        cur = await conn.execute(
+            "SELECT rowid, distance FROM vec_chunks "
+            "WHERE user_id=? AND embedding MATCH ? ORDER BY distance LIMIT ?",
+            (user_id, _pack(query_emb), k))
+        hits = [(r["rowid"], r["distance"]) for r in await cur.fetchall()]
+        if not hits:
+            return []
+        ids = [h[0] for h in hits]
+        ph = ",".join("?" * len(ids))
+        cur = await conn.execute(
+            f"SELECT c.id, c.meeting_id, c.text, m.title, m.created_at "
+            f"FROM chunks c JOIN meetings m ON m.id=c.meeting_id WHERE c.id IN ({ph})", ids)
+        meta = {r["id"]: dict(r) for r in await cur.fetchall()}
+    finally:
+        await conn.close()
+    out = []
+    for cid, dist in hits:
+        r = meta.get(cid)
+        if r:
+            out.append({"meeting_id": r["meeting_id"], "title": r["title"],
+                        "created_at": r["created_at"], "snippet": r["text"],
+                        "distance": round(float(dist), 4)})
+    return out
 
 
 async def set_status(mid: str, status: str, duration_sec: int | None = None):

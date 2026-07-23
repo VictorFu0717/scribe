@@ -12,12 +12,13 @@ body: {"messages":[{"role","content"}...], "meeting_id":str|null, "language":"zh
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Header
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app import config, db, llm
+from app import config, db, llm, rag
 
 router = APIRouter(tags=["assistant"])
 
@@ -40,9 +41,13 @@ TOOLS = [
         "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {
         "name": "search_meetings",
-        "description": "用關鍵字跨所有會議搜尋逐字稿,回傳相關片段與所屬會議。回答跨會議問題(如某主題、待辦)時用。",
+        "description": "跨所有會議做語意搜尋逐字稿,回傳相關片段與所屬會議。回答跨會議問題"
+                       "(如某主題、待辦、某段時間的重點)時用。可用日期範圍限定。",
         "parameters": {"type": "object", "properties": {
-            "query": {"type": "string", "description": "搜尋關鍵字"}}, "required": ["query"]}}},
+            "query": {"type": "string", "description": "要找的內容(語意查詢)"},
+            "date_from": {"type": "string", "description": "起始日期 YYYY-MM-DD(可選)"},
+            "date_to": {"type": "string", "description": "結束日期 YYYY-MM-DD(可選)"}},
+            "required": ["query"]}}},
 ]
 
 SYSTEM = (
@@ -51,6 +56,7 @@ SYSTEM = (
     "- 一律使用繁體中文(台灣用語)。\n"
     "- 根據工具查到的內容回答;查不到就說「找不到相關資訊」,不要編造。\n"
     "- 需要某場會議內容時,先用 list_meetings/search_meetings 找出 meeting_id,再取逐字稿或摘要。\n"
+    "- 若某場會議「摘要尚未產生」,改用 get_meeting_transcript 取逐字稿來回答,不要因為沒有摘要就放棄。\n"
     "- 回答精簡、切中重點,必要時條列。"
 )
 
@@ -79,7 +85,13 @@ async def _run_tool(name: str, args_str: str, user: str) -> str:
                             "created_at": m["created_at"], "status": m["status"]}
                            for m in ms], ensure_ascii=False)
     if name == "search_meetings":
-        rows = await db.search_transcripts(user, args.get("query", ""))
+        try:
+            rows = await rag.semantic_search(user, args.get("query", ""),
+                                             date_from=args.get("date_from"),
+                                             date_to=args.get("date_to"))
+        except Exception:
+            rows = await db.search_transcripts(user, args.get("query", ""))   # 退回關鍵字
+        rows = [{k: v for k, v in r.items() if k != "distance"} for r in rows]
         return json.dumps(rows, ensure_ascii=False) if rows else "(找不到相關會議)"
     return f"未知工具:{name}"
 
@@ -97,7 +109,9 @@ def _sse(obj) -> str:
 @router.post("/assistant/chat")
 async def assistant_chat(req: AssistantReq, x_user_id: str | None = Header(default=None)):
     user = _uid(x_user_id)
-    sys = SYSTEM
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    sys = SYSTEM + (f"\n\n今天是 {today}。若使用者用相對時間(如「上週」「上個月5號」),"
+                    f"請自行換算成 date_from/date_to(YYYY-MM-DD)傳給 search_meetings。")
     if req.meeting_id:
         sys += (f"\n\n使用者目前正在看會議 id=「{req.meeting_id}」;"
                 f"問「這場/本次會議」相關問題時,以此會議為準(可直接對它取逐字稿/摘要)。")

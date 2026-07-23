@@ -20,7 +20,7 @@ import numpy as np
 from fastapi import (APIRouter, BackgroundTasks, File, Form, Header,
                      HTTPException, UploadFile)
 
-from app import config, db, models
+from app import config, db, models, rag
 from app.diarize import SpeakerClusterer
 
 router = APIRouter(tags=["upload"])
@@ -55,8 +55,8 @@ def _cap_segments(segs: list, max_ms: int) -> list:
     return out
 
 
-async def _process(mid: str, audio: np.ndarray, diarize: bool):
-    """背景:VAD → 併發定稿 → (可選)語者分群 → 寫入儲存。"""
+async def _process(mid: str, user: str, audio: np.ndarray, diarize: bool):
+    """背景:VAD → 併發定稿 → (可選)語者分群 → 寫入儲存 → 建向量索引。"""
     try:
         raw_segs = await models.vad_offline(audio)
         segs = _cap_segments(raw_segs, MAX_SEG_MS)
@@ -90,6 +90,10 @@ async def _process(mid: str, audio: np.ndarray, diarize: bool):
 
         await db.save_transcript(mid, result)
         await db.set_status(mid, "ready", int(audio.size / SR))
+        try:
+            await rag.index_meeting(user, mid)   # ⑥ 建向量索引
+        except Exception as e:
+            print(f"[upload] {mid} 索引失敗: {e}")
         print(f"[upload] {mid} done: {len(result)} 段")
     except Exception as e:
         await db.set_status(mid, "error")
@@ -117,5 +121,5 @@ async def upload_audio(mid: str, background_tasks: BackgroundTasks,
         raise HTTPException(400, "decoded audio is empty")
 
     await db.set_status(mid, "transcribing")
-    background_tasks.add_task(_process, mid, audio, diarization)
+    background_tasks.add_task(_process, mid, user, audio, diarization)
     return {"id": mid, "status": "transcribing", "duration_sec": int(audio.size / SR)}
