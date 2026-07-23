@@ -140,6 +140,19 @@ body: {"transcript":"逐字稿全文","question":"問題","history":[{"role","co
 > **② 定稿寫入**：WS `config` 帶 `meeting_id` 後，`end` 定稿完成會把逐字稿 segments 寫入該會議，
 > 並更新 `duration_sec` 與 `status="ready"`。
 
+### ④ 會議摘要 — `POST /meetings/{id}/summarize`（SSE 串流）
+```
+body: {"language":"zh-Hant"}   (可省略)
+回傳(text/event-stream):
+  data: {"delta":"..."}            邊產邊顯示的 Markdown 文字
+  ...
+  data: {"overview":"..","key_points":[..],"decisions":[..],
+         "action_items":[{"task","owner?","due?"}],"follow_ups":[..]}   結構化卡片
+  data: [DONE]
+```
+> 先串流 Markdown 供顯示,串完解析成結構化 JSON、存入 DB(之後 `GET .../summary` 可取)。
+> 長逐字稿自動 **map-reduce**(分段濃縮再合併)。摘要會存檔並把會議 `has_summary` 設為 true。
+
 ### `GET /health`
 回傳各模型載入狀態。
 
@@ -192,7 +205,7 @@ body: {"transcript":"逐字稿全文","question":"問題","history":[{"role","co
 - [x] **① SQLite 儲存**（meetings / transcripts / summaries，掛 user_id 多租戶）
 - [x] **② 定稿寫入**（WS 帶 `meeting_id` → 定稿存入、status=ready、duration）
 - [x] **③ 會議 CRUD**（`/meetings` 系列端點）
-- [ ] **④ 摘要**（`POST /meetings/{id}/summarize`，SSE + 結構化 JSON，長逐字稿 map-reduce）
+- [x] **④ 摘要**（`POST /meetings/{id}/summarize`，SSE + 結構化 JSON，長逐字稿 map-reduce）
 - [ ] **⑤ agentic 助理**（`POST /assistant/chat`，工具:search_meetings / get_transcript / get_summary）
 - [ ] **⑥ RAG**（sqlite-vec + embedding，跨會議「上週待辦」「上個月5號重點」）
 - [ ] **⑦ 登入**（`POST /auth/token`）+ diarization 指定人數

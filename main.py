@@ -24,6 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app import config, db, models
 from app.chat_qa import router as qa_router
 from app.routers.meetings import router as meetings_router
+from app.summarize import router as summary_router
 from app.ws import router as ws_router
 
 
@@ -46,6 +47,7 @@ app.add_middleware(
 
 app.include_router(ws_router)
 app.include_router(meetings_router)
+app.include_router(summary_router)
 app.include_router(qa_router)
 
 
