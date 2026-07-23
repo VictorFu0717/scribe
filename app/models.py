@@ -88,6 +88,15 @@ async def vad(chunk, cache, is_final):
     return await _generate(_vad, chunk, cache, is_final, chunk_size=config.CHUNK_MS)
 
 
+async def vad_offline(audio: np.ndarray) -> list:
+    """離線 VAD:整段音訊 → [[beg_ms, end_ms], ...](檔案上傳轉錄用)。"""
+    loop = asyncio.get_running_loop()
+    async with _lock:
+        res = await loop.run_in_executor(
+            None, lambda: _vad.generate(input=audio.astype(np.float32)))
+    return res[0].get("value", []) if res else []
+
+
 async def preview(chunk, cache, is_final):
     return await _generate(
         _pf, chunk, cache, is_final, chunk_size=config.PF_CHUNK,

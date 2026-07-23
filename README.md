@@ -140,6 +140,15 @@ body: {"transcript":"逐字稿全文","question":"問題","history":[{"role","co
 > **② 定稿寫入**：WS `config` 帶 `meeting_id` 後，`end` 定稿完成會把逐字稿 segments 寫入該會議，
 > 並更新 `duration_sec` 與 `status="ready"`。
 
+### 整段錄音上傳轉錄 — `POST /meetings/{id}/audio`（背景批次）
+```
+multipart/form-data: file=<音檔 wav/flac/ogg;mp3/m4a 需 ffmpeg>, diarization=<true|false>
+→ {"id":..,"status":"transcribing","duration_sec":N}
+```
+> 上傳後 server **背景**處理:VAD 切段 → 每段送 Qwen3-ASR 定稿(併發,vLLM batching)→ 可選說話者辨識
+> → 寫入該會議。App 上傳後輪詢 `GET /meetings/{id}` 直到 `status="ready"`,再 `GET .../transcript`。
+> 過長的 VAD 段會自動切 ≤30s(`UPLOAD_MAX_SEG_SEC`);併發上限 `UPLOAD_CONCURRENCY`(預設 8)。
+
 ### ④ 會議摘要 — `POST /meetings/{id}/summarize`（SSE 串流）
 ```
 body: {"language":"zh-Hant"}   (可省略)
@@ -169,6 +178,8 @@ body: {"language":"zh-Hant"}   (可省略)
 | `CHAT_API_KEY` | `EMPTY` | 對話 LLM 金鑰（Ollama 隨意填如 `ollama`）|
 | `SCRIBE_DB` | `scribe.db` | SQLite 資料庫路徑 |
 | `DEFAULT_USER` | `dev` | 開發期預設 user_id（auth ⑦ 前的多租戶佔位）|
+| `UPLOAD_MAX_SEG_SEC` | `30` | 上傳轉錄:過長 VAD 段的再切秒數 |
+| `UPLOAD_CONCURRENCY` | `8` | 上傳轉錄:同時打 Qwen3-ASR 的段數上限 |
 | `STREAM_MODEL` / `VAD_MODEL` | `paraformer-zh-streaming` / `fsmn-vad` | 預覽 / 斷句模型 |
 | `FUNASR_HUB` | `hf` | FunASR 下載來源（`hf`/`ms`）|
 | `ASR_TRADITIONAL` | `1` | 簡→繁台灣用語轉換 |
