@@ -150,14 +150,16 @@ async def get_meeting(user_id: str, mid: str) -> dict | None:
 
 
 async def delete_meeting(user_id: str, mid: str) -> bool:
+    # 先確認會議屬於此使用者;不是就完全不動(避免用別人的 meeting_id 刪到別人的逐字稿/向量)
+    if await get_meeting(user_id, mid) is None:
+        return False
     async with aiosqlite.connect(config.DB_PATH) as db:
-        cur = await db.execute("DELETE FROM meetings WHERE user_id=? AND id=?", (user_id, mid))
+        await db.execute("DELETE FROM meetings WHERE id=?", (mid,))
         await db.execute("DELETE FROM transcript_segments WHERE meeting_id=?", (mid,))
         await db.execute("DELETE FROM summaries WHERE meeting_id=?", (mid,))
         await db.commit()
-        deleted = cur.rowcount > 0
-    await delete_chunks(mid)   # 連帶刪向量索引
-    return deleted
+    await delete_chunks(mid)   # 連帶刪向量索引(chunks + vec_chunks)
+    return True
 
 
 # ---- 向量索引 (⑥ RAG, sqlite-vec) ----
