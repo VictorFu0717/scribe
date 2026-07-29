@@ -3,6 +3,8 @@
 即時把會議錄音轉成**逐字稿**（邊講邊出字）、句子結束自動**定稿**（高準），
 並可針對該場會議**問答**。目標是一個個人助理 app 的後端；本 repo 是 server 端。
 
+> 📱 手機 App（iOS/Android 客戶端）：[**scribe-app**](https://github.com/VictorFu0717/scribe-app)
+>
 > 目錄名目前仍是 `websocket_ASR`，專案代稱為 **scribe**。
 
 ---
