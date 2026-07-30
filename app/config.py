@@ -53,11 +53,12 @@ AUTH_TTL = int(os.getenv("AUTH_TTL", "43200"))     # token 有效秒數(預設 1
 # false(開發):端點不強制 token,沒帶就退回 X-User-Id / DEFAULT_USER;/auth/token 未知帳號自動註冊
 # true (正式):所有端點強制 Bearer,沒帶 401;不自動註冊
 AUTH_REQUIRED = os.getenv("AUTH_REQUIRED", "0") in ("1", "true", "True")
-# 身分來源:
-#   "tailscale"(預設,內部用):user_id 取自 tailscale whois(誰從 tailnet 連進來)。
-#              tailnet 邀請名單即白名單/核准,不需 app 帳密登入。
-#   "jwt"(產品化/對公網):user_id 取自 JWT bearer(帳密註冊登入)。
-AUTH_MODE = os.getenv("AUTH_MODE", "tailscale")
+# 身分來源(RAG 多租戶靠這個 user_id):
+#   "jwt"(預設):帳密登入 → JWT。使用者同時走公司 WiFi(LAN 直連)與 Tailscale(外出),
+#               LAN 沒有網路層身分,只能靠 app 登入才能在兩條路徑上得到「一致」的身分。
+#   "tailscale":純內部、且只走 tailnet 時可用,身分直接取自 tailscale whois(免 app 登入)。
+#               不適用「同時有 WiFi 直連」的情況。
+AUTH_MODE = os.getenv("AUTH_MODE", "jwt")
 
 # --- 開發期多租戶佔位(AUTH_REQUIRED=false 時的退回身分)---
 DEFAULT_USER = os.getenv("DEFAULT_USER", "dev")

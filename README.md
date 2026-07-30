@@ -177,13 +177,11 @@ body: {"language":"zh-Hant"}   (可省略)
 
 由 `AUTH_MODE` 決定；**切換只改這一個設定**，RAG / 會議 / 摘要等其他程式完全不用動（都只吃 `get_current_user` 給的 `user_id`）。
 
-**`AUTH_MODE=tailscale`（預設，內部使用）— 身分取自 Tailscale**
-- server 用 `tailscale whois <來源IP>` 把連線對應到 Tailscale 使用者（email/LoginName），當作 `user_id`。
-- **不需要 app 帳密登入**；「有沒有被邀請進 tailnet」就是你的白名單／核准。
-- 同一人多裝置＝同一身分（email 一致）；不同人＝不同 email＝不同租戶。
-- 本機／loopback（非 tailnet）連線 → 退回 `DEFAULT_USER`。WS 亦同（取自來源 IP 的 whois）。
+> **為什麼預設 `jwt`**：使用者會**同時**走公司 WiFi（同網段直連 `192.168.x.x`）和 Tailscale（外出 `100.x`）。
+> LAN 不提供「使用者是誰」，只有**應用層登入**才能在兩條路徑上得到一致身分。帳密登入一次（app 存 token）→
+> 走哪條網路都認得同一人。此時 Tailscale 只是**純遠端連線通道（VPN）**，不再是身分來源。
 
-**`AUTH_MODE=jwt`（產品化 / 對公網）— 帳密註冊登入 → JWT**
+**`AUTH_MODE=jwt`（預設；WiFi + Tailscale 混用、或對公網）— 帳密登入 → JWT**
 ```
 POST /auth/register  {"username","password"}       → {access_token,token_type,expires_in,user_id,username}
 POST /auth/token     form: username=&password=     → 同上(OAuth2 標準)
@@ -191,7 +189,11 @@ GET  /auth/me        Authorization: Bearer <jwt>   → 目前使用者
 ```
 - 端點以 `Authorization: Bearer <jwt>` 認身分；WS 可用 `?token=`／`Authorization` header／`config` 訊息帶 `token`。
 - `AUTH_REQUIRED=1` 強制 token（否則 401）；`=0`（開發）沒帶退回 `X-User-Id`／`DEFAULT_USER`，且 `/auth/token` 未知帳號自動註冊。
-- （帳號審核制：register→待審→admin 核准，待產品化時實作。）
+- 帳號管理：目前**開放註冊**（網路已被 WiFi/Tailscale 閘控）；審核制／邀請制待補（register→待審→admin 核准）。
+
+**`AUTH_MODE=tailscale`（選用；純內部、且只走 tailnet 時）— 身分取自 `tailscale whois`**
+- 免 app 登入，tailnet 邀請名單即白名單；同一人多裝置＝同一 email＝同一租戶。
+- ⚠️ **不適用「同時有公司 WiFi 直連」**：LAN 連線 whois 認不出人（會全退回 `DEFAULT_USER`）→ 這種混用要用 `jwt`。
 
 ### `GET /health`
 回傳各模型載入狀態。
@@ -213,7 +215,7 @@ GET  /auth/me        Authorization: Bearer <jwt>   → 目前使用者
 | `EMBED_MODEL` | `bge-m3` | Embedding 模型（1024 維）|
 | `EMBED_DIM` | `1024` | 向量維度（換模型要一起改）|
 | `RAG_CHUNK_CHARS` | `400` | 逐字稿切塊字元數 |
-| `AUTH_MODE` | `tailscale` | 身分來源:`tailscale`(whois 取 email;內部用) 或 `jwt`(帳密登入;產品化) |
+| `AUTH_MODE` | `jwt` | 身分來源:`jwt`(帳密登入,預設;WiFi+Tailscale 混用一致身分) 或 `tailscale`(whois,純 tailnet 才適用) |
 | `AUTH_SECRET` | `dev-insecure...` | JWT 簽章密鑰（`jwt` 模式;**正式務必覆寫**,>=32 bytes）|
 | `AUTH_TTL` | `43200` | token 有效秒數（12h）|
 | `AUTH_REQUIRED` | `0` | (`jwt` 模式) `1`=強制 Bearer;`0`=沒帶退回 `X-User-Id`/`DEFAULT_USER` |
@@ -259,6 +261,6 @@ GET  /auth/me        Authorization: Bearer <jwt>   → 目前使用者
 - [x] **⑤ agentic 助理**（`POST /assistant/chat`，手寫 loop + 工具:get_transcript/get_summary/list/search）
 - [x] **⑥ RAG**（sqlite-vec + bge-m3 語意檢索;定稿/上傳後自動索引;多租戶 user_id 分區 + 日期過濾）
 - [x] 整段錄音上傳轉錄（`POST /meetings/{id}/audio`，背景批次）
-- [x] **⑦ 身分辨識**（`AUTH_MODE`:tailscale=whois 取 email(內部,預設) / jwt=帳密登入(產品化);切換不影響其他程式）
+- [x] **⑦ 身分辨識**（`AUTH_MODE`:jwt=帳密登入(預設;WiFi+Tailscale 混用一致身分) / tailscale=whois(純 tailnet 選用)）
 - [ ] 帳號審核制 + admin 管理（產品化時;register→待審→核准）
 - [ ] diarization 指定人數（`speaker_count`;上傳路徑 K 群聚類,選配）
