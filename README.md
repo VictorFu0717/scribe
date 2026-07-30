@@ -67,6 +67,19 @@ app/
 
 ---
 
+## 部署與連線（Tailscale + JWT）
+
+- **連線一律走 Tailscale**：app／使用者連 server 的 tailnet IP `http://100.68.0.81:8005`
+  （WS 用 `ws://100.68.0.81:8005/ws/asr`）。公司內、外出都一樣，不受網段影響。
+- **為什麼不走公司 WiFi 直連**：WiFi 客戶端（如 `192.168.68.x`）與 server 有線網段（`192.168.0.0/23`）**不同網段**，
+  直連需請 MIS 開通跨網段路由；Tailscale 走 WireGuard 隧道、與網段無關、零網管成本，故直接全走 Tailscale。
+- **身分辨識走 JWT**（`AUTH_MODE=jwt`）：登入拿 token，與連線層無關 → 換網路也是同一身分（多租戶 `user_id` 一致）。
+- **對外只開 `8005`**（`ufw allow in on tailscale0`；LAN 直連才需 `ufw allow from 192.168.0.0/23 to any port 8005`）。
+  `9000`(Qwen3-ASR)、`11434`(Ollama) 為內部服務，防火牆擋著即可（Ollama 若要給內網同仁，只對 LAN 網段開）。
+- **人數**：Tailscale 免費上限 6 users；~15 人需付費方案，或自架 **Headscale**（開源、無使用者上限）。
+
+---
+
 ## 前置需求
 
 - NVIDIA GPU + driver + [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)（Windows 用 Docker Desktop + WSL2）
