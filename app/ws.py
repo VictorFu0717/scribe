@@ -23,7 +23,7 @@ import numpy as np
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app import config, db, models, rag
-from app.auth import decode_jwt
+from app.auth import decode_jwt, tailscale_whois
 from app.diarize import SpeakerClusterer
 
 router = APIRouter()
@@ -33,15 +33,18 @@ router = APIRouter()
 async def ws_asr(ws: WebSocket):
     await ws.accept()
 
-    # --- ⑦ auth:WS 可用 ?token= 或 Authorization: Bearer 帶 JWT(亦可在 config 訊息帶 token) ---
-    _auth = ws.headers.get("authorization", "")
-    _tok = ws.query_params.get("token") or (
-        _auth.split(" ", 1)[1] if _auth.lower().startswith("bearer ") else None)
-    _uid0 = decode_jwt(_tok) if _tok else None
-    if config.AUTH_REQUIRED and not _uid0:
-        await ws.send_text(json.dumps({"type": "error", "detail": "需要登入"}, ensure_ascii=False))
-        await ws.close(code=4401)
-        return
+    # --- 身分辨識:tailscale 模式取自 whois(來源IP);jwt 模式取自 token(?token=/header) ---
+    if config.AUTH_MODE == "tailscale":
+        _uid0 = await tailscale_whois(ws.client.host if ws.client else None)
+    else:
+        _auth = ws.headers.get("authorization", "")
+        _tok = ws.query_params.get("token") or (
+            _auth.split(" ", 1)[1] if _auth.lower().startswith("bearer ") else None)
+        _uid0 = decode_jwt(_tok) if _tok else None
+        if config.AUTH_REQUIRED and not _uid0:
+            await ws.send_text(json.dumps({"type": "error", "detail": "需要登入"}, ensure_ascii=False))
+            await ws.close(code=4401)
+            return
 
     # --- 每連線狀態 ---
     pf_cache: dict = {}
@@ -208,13 +211,14 @@ async def ws_asr(ws: WebSocket):
 
                 t = ctrl.get("type")
                 if t == "config":
-                    if ctrl.get("token"):                       # ⑦ 也可在 config 帶 token
+                    # jwt 模式才允許用 config 的 token/user_id 覆寫身分;tailscale 模式身分固定由 whois 決定
+                    if config.AUTH_MODE == "jwt" and ctrl.get("token"):
                         _u = decode_jwt(ctrl["token"])
                         if _u:
                             user_id = _u
                     if ctrl.get("meeting_id"):
                         meeting_id = ctrl["meeting_id"]
-                    if ctrl.get("user_id") and not config.AUTH_REQUIRED:
+                    if config.AUTH_MODE == "jwt" and ctrl.get("user_id") and not config.AUTH_REQUIRED:
                         user_id = ctrl["user_id"]              # 開發期才允許直接指定
                     if "diarization" in ctrl:
                         diarize_on = bool(ctrl["diarization"])

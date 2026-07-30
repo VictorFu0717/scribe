@@ -21,7 +21,8 @@ services:
     container_name: vllm-qwen3-asr
     restart: unless-stopped
     ports:
-      - "9000:8000"
+      # 只綁 loopback:scribe(在 host)用 localhost:9000 連得到,外部連不到(避免繞過 scribe 直打 vLLM)
+      - "127.0.0.1:9000:8000"
     volumes:
       # 重用 host 上已下載的 HuggingFace 快取,避免容器重抓 ~3.5GB 模型
       - ${HF_CACHE:-${HOME}/.cache/huggingface}:/root/.cache/huggingface

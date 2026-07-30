@@ -11,11 +11,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import shutil
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
 import jwt
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
 
@@ -68,9 +71,36 @@ def _token_response(user: dict) -> dict:
     }
 
 
+async def tailscale_whois(ip: str | None) -> str | None:
+    """用 tailscale whois 把來源 IP 對應到 Tailscale 使用者(email/LoginName);查不到回 None。"""
+    if not ip or ip.startswith("127.") or ip == "::1":
+        return None
+    if not shutil.which("tailscale"):
+        return None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "tailscale", "whois", "--json", ip,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
+        if proc.returncode != 0:
+            return None
+        data = json.loads(out.decode() or "{}")
+        return (data.get("UserProfile") or {}).get("LoginName") or None
+    except Exception:
+        return None
+
+
 # --- 依賴:從請求解出 user_id ---
-async def get_current_user(authorization: str | None = Header(default=None),
+async def get_current_user(request: Request,
+                           authorization: str | None = Header(default=None),
                            x_user_id: str | None = Header(default=None)) -> str:
+    # 內部模式:身分取自 Tailscale(誰從 tailnet 連進來);tailnet 邀請名單即白名單,不需 app 登入
+    if config.AUTH_MODE == "tailscale":
+        ip = request.client.host if request.client else None
+        who = await tailscale_whois(ip)
+        return who or x_user_id or config.DEFAULT_USER   # 本機/loopback 退回預設
+
+    # 產品化模式:JWT bearer 登入
     token = _bearer(authorization)
     if token:
         uid = decode_jwt(token)
@@ -80,7 +110,7 @@ async def get_current_user(authorization: str | None = Header(default=None),
             raise HTTPException(401, "無效或過期的 token")
     if config.AUTH_REQUIRED:
         raise HTTPException(401, "需要登入(Authorization: Bearer)")
-    return x_user_id or config.DEFAULT_USER   # 開發期退回身分
+    return x_user_id or config.DEFAULT_USER
 
 
 # --- 端點 ---
