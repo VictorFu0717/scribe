@@ -131,6 +131,8 @@ Server → Client (JSON):
 ```
 > **說話者辨識**：可開關、用到才載入（不開＝零 VRAM）。開啟後每句定稿會標上「說話者N」，
 > `segments` 提供結構化結果，`committed`/`final.text` 會加「說話者N：」前綴並逐句換行。
+> 準度取決於**斷句細緻度**：一段若含多位說話者，只會判給一人。用 `VAD_MAX_END_SILENCE_MS`（越小切越細）
+> 調整；但「兩人零停頓連續交談」VAD 切不開，需真正的語者分離（未來可加 pyannote 離線精修）。
 
 ### ⑤ agentic 助理 — `POST /assistant/chat`（SSE 串流）
 ```
@@ -237,7 +239,9 @@ GET  /auth/me        Authorization: Bearer <jwt>   → 目前使用者
 | `STREAM_MODEL` / `VAD_MODEL` | `paraformer-zh-streaming` / `fsmn-vad` | 預覽 / 斷句模型 |
 | `FUNASR_HUB` | `hf` | FunASR 下載來源（`hf`/`ms`）|
 | `ASR_TRADITIONAL` | `1` | 簡→繁台灣用語轉換 |
-| `MAX_SEG_SEC` | `30` | 連續講不停的安全切段秒數 |
+| `MAX_SEG_SEC` | `20` | ws 端安全切段秒數（VAD 沒斷時的後盾）|
+| `VAD_MAX_END_SILENCE_MS` | `350` | VAD 斷句停頓門檻(ms)。越小切越細→每段更可能單一說話者、語者辨識越準;但太小逐字稿會碎。fsmn 原生 800 太鈍 |
+| `VAD_MAX_SEGMENT_SEC` | `15` | VAD 單段上限秒數（fsmn 原生 60s）|
 | `DIARIZE` | `0` | 說話者辨識是否預設開（通常由 app 用 config 訊息控制）|
 | `SPK_MODEL` | `funasr/campplus` | 語者向量模型;ERes2NetV2 用 `iic/speech_eres2netv2_sv_zh-cn_16k-common` |
 | `SPK_HUB` | 同 `FUNASR_HUB` | 語者模型下載來源（ERes2NetV2 在 ModelScope 需設 `ms`）|

@@ -35,7 +35,9 @@ async def startup():
     _pf = AutoModel(model=config.STREAM_MODEL, hub=config.FUNASR_HUB,
                     device=config.DEVICE, disable_update=True)
     _vad = AutoModel(model=config.VAD_MODEL, hub=config.FUNASR_HUB,
-                     device=config.DEVICE, disable_update=True)
+                     device=config.DEVICE, disable_update=True,
+                     max_end_silence_time=config.VAD_MAX_END_SILENCE_MS,
+                     max_single_segment_time=int(config.VAD_MAX_SEGMENT_SEC * 1000))
     _oai = AsyncOpenAI(base_url=config.VLLM_BASE_URL, api_key=config.VLLM_API_KEY)
     if config.ASR_TW:
         try:

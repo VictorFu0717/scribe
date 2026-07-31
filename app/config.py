@@ -13,7 +13,13 @@ FUNASR_HUB = os.getenv("FUNASR_HUB", "hf")   # 本機 hf 下載遠快於 ms
 DEVICE = os.getenv("DEVICE", "cuda")
 
 ASR_LANG = os.getenv("ASR_LANG") or None
-MAX_SEG_SEC = float(os.getenv("MAX_SEG_SEC", "30"))
+MAX_SEG_SEC = float(os.getenv("MAX_SEG_SEC", "20"))   # ws 端安全切段(VAD 沒斷時的後盾)
+
+# VAD 斷句靈敏度 —— 切得細,每段更可能單一說話者(改善語者辨識準度)
+# max_end_silence_time:停頓超過這麼久(ms)就斷句。fsmn 預設 800 太鈍(連續講話會併成 60s 巨段);
+#   降到 ~350 → 一般會議的自然停頓就會斷,段落短、多為單一說話者。
+VAD_MAX_END_SILENCE_MS = int(os.getenv("VAD_MAX_END_SILENCE_MS", "350"))
+VAD_MAX_SEGMENT_SEC = float(os.getenv("VAD_MAX_SEGMENT_SEC", "15"))   # 單段上限(fsmn 預設 60s→15s)
 ASR_TW = os.getenv("ASR_TRADITIONAL", "1") not in ("0", "false", "False", "")
 
 # --- 說話者辨識(可開關、lazy-load)---
