@@ -240,7 +240,7 @@ GET  /auth/me        Authorization: Bearer <jwt>   → 目前使用者
 | `FUNASR_HUB` | `hf` | FunASR 下載來源（`hf`/`ms`）|
 | `ASR_TRADITIONAL` | `1` | 簡→繁台灣用語轉換 |
 | `MAX_SEG_SEC` | `20` | ws 端安全切段秒數（VAD 沒斷時的後盾）|
-| `VAD_MAX_END_SILENCE_MS` | `350` | VAD 斷句停頓門檻(ms)。越小切越細→每段更可能單一說話者、語者辨識越準;但太小逐字稿會碎。fsmn 原生 800 太鈍 |
+| `VAD_MAX_END_SILENCE_MS` | `500` | VAD 斷句停頓門檻(ms)。太小(350)句子被切碎、太大(800)一段混多人。語者不夠細→調小(400);句子被切碎→調大(600~700) |
 | `VAD_MAX_SEGMENT_SEC` | `15` | VAD 單段上限秒數（fsmn 原生 60s）|
 | `DIARIZE` | `0` | 說話者辨識是否預設開（通常由 app 用 config 訊息控制）|
 | `SPK_MODEL` | `funasr/campplus` | 語者向量模型;ERes2NetV2 用 `iic/speech_eres2netv2_sv_zh-cn_16k-common` |
