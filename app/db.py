@@ -63,7 +63,7 @@ async def init_db():
                 id TEXT PRIMARY KEY, username TEXT UNIQUE, password_hash TEXT, created_at TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_meetings_user ON meetings(user_id, created_at);
-            CREATE INDEX IF NOT EXISTS idx_seg_meeting ON transcript_segments(meeting_id, seq);
+            CREATE UNIQUE INDEX IF NOT EXISTS uniq_seg ON transcript_segments(meeting_id, seq);
             CREATE TABLE IF NOT EXISTS chunks(
                 id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, meeting_id TEXT,
                 seq INTEGER, text TEXT
@@ -243,6 +243,28 @@ async def save_transcript(mid: str, segments: list[dict]):
             [(mid, i, s.get("text", ""), s.get("speaker"),
               s.get("start_ms"), s.get("end_ms")) for i, s in enumerate(segments)])
         await db.commit()
+
+
+async def upsert_segment(meeting_id: str, seq: int, text: str, speaker: str | None,
+                         start_ms: int | None, end_ms: int | None):
+    """逐句寫入(即時串流用):按 (meeting_id, seq) upsert,斷線也不丟已定稿的句子。"""
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO transcript_segments(meeting_id,seq,text,speaker,start_ms,end_ms) "
+            "VALUES(?,?,?,?,?,?) "
+            "ON CONFLICT(meeting_id,seq) DO UPDATE SET "
+            "text=excluded.text, speaker=excluded.speaker, "
+            "start_ms=excluded.start_ms, end_ms=excluded.end_ms",
+            (meeting_id, seq, text, speaker, start_ms, end_ms))
+        await db.commit()
+
+
+async def count_segments(meeting_id: str) -> int:
+    """該會議 DB 既有段數(reconnect-continue 的續錄起點)。"""
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM transcript_segments WHERE meeting_id=?", (meeting_id,))
+        return (await cur.fetchone())[0]
 
 
 async def get_transcript(user_id: str, mid: str) -> list[dict] | None:

@@ -163,8 +163,9 @@ body: {"transcript":"逐字稿全文","question":"問題","history":[{"role","co
 | `GET /meetings/{id}/transcript` | `{"segments":[{id,text,speaker,is_final,start_ms,end_ms}]}` |
 | `GET /meetings/{id}/summary` | 有摘要回 JSON；沒有回 **404** |
 
-> **② 定稿寫入**：WS `config` 帶 `meeting_id` 後，`end` 定稿完成會把逐字稿 segments 寫入該會議，
-> 並更新 `duration_sec` 與 `status="ready"`。
+> **② 定稿寫入（逐句即時、斷線不丟）**：WS `config` 帶 `meeting_id` 後，**每句定稿就立刻寫入 DB**（不等 `end`）。
+> 所以 iOS 背景中斷／WS 斷線也不會丟已定稿的句子；`end` 或斷線收尾時把會議設 `status="ready"` + 更新 `duration_sec` + 建 RAG 索引（不會卡在「轉錄中」）。
+> **重連續錄**：用同一 `meeting_id` 重新 `config`，會接在既有段落之後續號（不覆蓋）。
 
 ### 整段錄音上傳轉錄 — `POST /meetings/{id}/audio`（背景批次）
 ```
