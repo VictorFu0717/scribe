@@ -59,6 +59,10 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS summaries(
                 meeting_id TEXT PRIMARY KEY, data TEXT, created_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS translations(
+                meeting_id TEXT, target TEXT, text TEXT, created_at TEXT,
+                PRIMARY KEY (meeting_id, target)
+            );
             CREATE TABLE IF NOT EXISTS users(
                 id TEXT PRIMARY KEY, username TEXT UNIQUE, password_hash TEXT, created_at TEXT
             );
@@ -157,6 +161,7 @@ async def delete_meeting(user_id: str, mid: str) -> bool:
         await db.execute("DELETE FROM meetings WHERE id=?", (mid,))
         await db.execute("DELETE FROM transcript_segments WHERE meeting_id=?", (mid,))
         await db.execute("DELETE FROM summaries WHERE meeting_id=?", (mid,))
+        await db.execute("DELETE FROM translations WHERE meeting_id=?", (mid,))
         await db.commit()
     await delete_chunks(mid)   # 連帶刪向量索引(chunks + vec_chunks)
     return True
@@ -326,3 +331,24 @@ async def get_summary(user_id: str, mid: str) -> dict | None:
         cur = await db.execute("SELECT data FROM summaries WHERE meeting_id=?", (mid,))
         r = await cur.fetchone()
         return json.loads(r["data"]) if r else None
+
+
+# ---- translations (留檔翻譯;每個 (meeting_id, target) 一份) ----
+async def save_translation(mid: str, target: str, text: str):
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO translations(meeting_id,target,text,created_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(meeting_id,target) DO UPDATE SET text=excluded.text, created_at=excluded.created_at",
+            (mid, target, text, _now()))
+        await db.commit()
+
+
+async def get_translation(user_id: str, mid: str, target: str) -> str | None:
+    if await get_meeting(user_id, mid) is None:
+        return None
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT text FROM translations WHERE meeting_id=? AND target=?", (mid, target))
+        r = await cur.fetchone()
+        return r["text"] if r else None

@@ -27,6 +27,7 @@ from app.auth import router as auth_router
 from app.chat_qa import router as qa_router
 from app.routers.meetings import router as meetings_router
 from app.summarize import router as summary_router
+from app.translate import router as translate_router
 from app.upload import router as upload_router
 from app.ws import router as ws_router
 
@@ -52,6 +53,7 @@ app.include_router(auth_router)
 app.include_router(ws_router)
 app.include_router(meetings_router)
 app.include_router(summary_router)
+app.include_router(translate_router)
 app.include_router(upload_router)
 app.include_router(assistant_router)
 app.include_router(qa_router)

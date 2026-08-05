@@ -211,6 +211,16 @@ GET  /auth/me        Authorization: Bearer <jwt>   → 目前使用者
 - 免 app 登入，tailnet 邀請名單即白名單；同一人多裝置＝同一 email＝同一租戶。
 - ⚠️ **不適用「同時有公司 WiFi 直連」**：LAN 連線 whois 認不出人（會全退回 `DEFAULT_USER`）→ 這種混用要用 `jwt`。
 
+### 留檔翻譯 — `POST /meetings/{id}/translate`（SSE 串流）
+```
+body: {"target":"en"}    (語言代碼或名稱;en/ja/ko/zh-Hant/vi/…)
+回傳(SSE): data: {"delta":"..."}  ...  data: [DONE]
+GET /meetings/{id}/translation?target=en  → {"target","text"}   (未翻過回 404)
+```
+> 把逐字稿用 chat LLM 翻成目標語言、保留每行「說話者N：」逐行結構、串流回傳並**存檔**（可重取）。長逐字稿分段翻。
+> **即時雙語字幕請走 app 端「裝置內翻譯」**（google_mlkit_translation / Apple Translation，零延遲、免 server 負載）；
+> 此端點是「會後留檔的高品質翻譯」。
+
 ### `GET /health`
 回傳各模型載入狀態。
 
@@ -231,6 +241,7 @@ GET  /auth/me        Authorization: Bearer <jwt>   → 目前使用者
 | `EMBED_MODEL` | `bge-m3` | Embedding 模型（1024 維）|
 | `EMBED_DIM` | `1024` | 向量維度（換模型要一起改）|
 | `RAG_CHUNK_CHARS` | `400` | 逐字稿切塊字元數 |
+| `TRANSLATE_MAP_CHARS` | `3000` | 留檔翻譯:超過此長度就分段翻 |
 | `AUTH_MODE` | `jwt` | 身分來源:`jwt`(帳密登入,預設;WiFi+Tailscale 混用一致身分) 或 `tailscale`(whois,純 tailnet 才適用) |
 | `AUTH_SECRET` | `dev-insecure...` | JWT 簽章密鑰（`jwt` 模式;**正式務必覆寫**,>=32 bytes）|
 | `AUTH_TTL` | `43200` | token 有效秒數（12h）|
