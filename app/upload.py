@@ -66,10 +66,13 @@ async def _process(mid: str, user: str, audio: np.ndarray, diarize: bool):
         sem = asyncio.Semaphore(CONCURRENCY)
 
         async def fin(clip):
-            if not clip.size:
+            if not models.is_speech_segment(clip):   # 非語音段不送定稿(會被幻覺成假句子)
                 return ""
             async with sem:
-                return await models.finalize_qwen(clip)
+                try:
+                    return await models.finalize_qwen(clip)
+                except Exception:
+                    return ""                        # 逾時/失敗:略過該段,不讓整批上傳失敗
 
         texts = await asyncio.gather(*[fin(c) for c in clips])
 

@@ -18,9 +18,30 @@ MAX_SEG_SEC = float(os.getenv("MAX_SEG_SEC", "20"))   # ws 端安全切段(VAD �
 # VAD 斷句停頓門檻(ms):停頓超過這麼久才斷句。權衡:
 #   太大(fsmn 預設 800)→ 一段混多人 → 語者判錯;太小(350)→ 句內小停頓也切、句子被切碎。
 #   500 是甜蜜點(抓句尾停頓、不抓句內猶豫)。語者還分不夠細→調小(400);句子還被切碎→調大(600~700)。
-VAD_MAX_END_SILENCE_MS = int(os.getenv("VAD_MAX_END_SILENCE_MS", "500"))
+VAD_MAX_END_SILENCE_MS = int(os.getenv("VAD_MAX_END_SILENCE_MS", "550"))
 VAD_MAX_SEGMENT_SEC = float(os.getenv("VAD_MAX_SEGMENT_SEC", "15"))   # 單段上限(fsmn 預設 60s→15s)
 ASR_TW = os.getenv("ASR_TRADITIONAL", "1") not in ("0", "false", "False", "")
+
+# --- 定稿前的音訊守門(擋幻覺 + 擋卡死)---
+# 實測(2026-08,直接打 :9000):送「純靜音 3s」→ 模型失控生成、25s 不回應;
+#   送「低雜訊」→ 憑空生出「嗯。」「no.」(還判成西班牙文)。非語音段若照送,
+#   假句子會寫進 DB 還配一個說話者;長靜音更會把「單一序列」的定稿佇列整個堵住。
+FINALIZE_TIMEOUT = float(os.getenv("FINALIZE_TIMEOUT", "30"))   # 單段定稿逾時(秒);逾時退回預覽文字,不整句丟掉
+MIN_SEG_MS = float(os.getenv("MIN_SEG_MS", "150"))              # 短於此的碎段不送定稿(單音節通常 >150ms)
+# 30ms 框的最大 RMS 低於此 → 視為非語音。**刻意設得很低**:實測 Qwen3-ASR 對小聲音訊極穩健
+# (把語音縮到 0.002 倍、框峰值 0.0004,仍逐字正確),所以門檻拉高只會誤刪真語音,換不到好處。
+# 這道門的職責僅限「擋掉數位靜音/近乎零訊號」(MAX_SEG_SEC 硬切出的空白段、手機靜音或中斷送來的零),
+# 那才是實測會讓模型失控生成、把定稿佇列卡死的輸入。環境雜訊的幻覺不靠它,靠下面的正規化 + 逾時。
+# 0.0005 ≈ PCM16 的 16 個量化階(量化底是 1/32768≈3e-5),等於在問「這段訊號是不是死的」。
+# 實測真實語音縮到 0.005 倍(框峰值 0.0009)仍可正確辨識,設在這個位置才不會誤刪它。
+MIN_SEG_RMS = float(os.getenv("MIN_SEG_RMS", "0.0005"))
+# 段前補上前一段的尾巴當 lead-in(VAD 要靜音才斷句 → 補進來的是靜音,不會產生重複字);0=關。
+SEG_PAD_MS = float(os.getenv("SEG_PAD_MS", "200"))
+# 音量正規化:小聲的段落放大到目標 RMS 再送定稿。只放大不壓低(壓低救不了已削波的音訊),增益有上限。
+# 實測價值不在「提升小聲語音準確度」(模型本來就夠穩),而在**抑制幻覺**:微弱雜訊放大到正常音量後,
+# 模型更能認出那只是雜訊 —— 12 次雜訊測試的幻覺數 3 → 0。0=關。
+SEG_NORM_RMS = float(os.getenv("SEG_NORM_RMS", "0.05"))
+SEG_NORM_MAX_GAIN = float(os.getenv("SEG_NORM_MAX_GAIN", "8"))
 
 # --- 說話者辨識(可開關、lazy-load)---
 DIARIZE_DEFAULT = os.getenv("DIARIZE", "0") in ("1", "true", "True")

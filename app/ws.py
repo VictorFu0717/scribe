@@ -54,6 +54,7 @@ async def ws_asr(ws: WebSocket):
     seg_dur = 0.0
     segments: list = []                 # {"text","speaker","start_ms","end_ms"}
     cur_preview = ""
+    pad_tail = np.zeros(0, dtype=np.float32)   # 上一段的尾巴,補到下一段前面當 lead-in
     diarize_on = config.DIARIZE_DEFAULT
     clusterer = SpeakerClusterer(config.SPK_THRESHOLD, config.SPK_PREFIX)
 
@@ -106,9 +107,14 @@ async def ws_asr(ws: WebSocket):
                     break
                 idx, seg = item
                 try:
-                    text = await models.finalize_qwen(seg)
-                    if text:
-                        segments[idx]["text"] = text
+                    try:
+                        text = await models.finalize_qwen(seg)
+                        if text:
+                            segments[idx]["text"] = text
+                    except Exception as e:
+                        # 定稿逾時/失敗:保留 paraformer 預覽文字當退路,底下照樣寫入 DB。
+                        # (以前這個例外會連帶跳過寫入 → 整句從逐字稿消失)
+                        await send({"type": "error", "detail": f"finalize: {e}"})
                     if diarize_on and seg.size:
                         try:
                             emb = await models.spk_embed(seg)
@@ -126,14 +132,14 @@ async def ws_asr(ws: WebSocket):
                         except Exception as e:
                             await send({"type": "error", "detail": f"persist: {e}"})
                 except Exception as e:
-                    await send({"type": "error", "detail": f"finalize: {e}"})
+                    await send({"type": "error", "detail": f"segment: {e}"})
             finally:
                 fin_queue.task_done()
 
     fin_task = asyncio.create_task(finalizer())
 
     def close_segment():
-        nonlocal cur_preview, pf_cache, seg_samples, seg_dur, seg_start_ms
+        nonlocal cur_preview, pf_cache, seg_samples, seg_dur, seg_start_ms, pad_tail
         seg = np.concatenate(seg_samples) if seg_samples else np.zeros(0, np.float32)
         idx = len(segments)
         segments.append({"text": cur_preview, "speaker": None,
@@ -143,8 +149,19 @@ async def ws_asr(ws: WebSocket):
         seg_samples = []
         seg_dur = 0.0
         seg_start_ms = elapsed_ms
-        if seg.size > 0:
-            fin_queue.put_nowait((idx, seg))
+        if seg.size == 0:
+            return
+        pad_n = int(config.SAMPLE_RATE * config.SEG_PAD_MS / 1000)
+        if not models.is_speech_segment(seg):
+            # 非語音(靜音/雜訊/碎段):不送定稿——送了會被幻覺成假句子,長靜音還會卡死佇列。
+            # 連預覽文字一起清掉,才不會把 paraformer 對雜訊的臆測寫進 DB。
+            segments[idx]["text"] = ""
+            pad_tail = seg[-pad_n:] if pad_n else pad_tail
+            return
+        # 段前補前一段的尾巴當 lead-in(斷句處是靜音,不會重複字),讓模型不要從語音起點硬切進來
+        fin_seg = np.concatenate([pad_tail, seg]) if pad_tail.size else seg
+        pad_tail = seg[-pad_n:] if pad_n else pad_tail
+        fin_queue.put_nowait((idx, fin_seg))
 
     async def process_chunk(chunk, is_final):
         nonlocal cur_preview, seg_dur, elapsed_ms
@@ -178,13 +195,14 @@ async def ws_asr(ws: WebSocket):
 
     def reset_all():
         nonlocal pf_cache, vad_cache, audio_buf, seg_samples, seg_dur
-        nonlocal cur_preview, clusterer, elapsed_ms, seg_start_ms
+        nonlocal cur_preview, clusterer, elapsed_ms, seg_start_ms, pad_tail
         pf_cache = {}
         vad_cache = {}
         audio_buf = np.zeros(0, dtype=np.float32)
         seg_samples = []
         seg_dur = 0.0
         cur_preview = ""
+        pad_tail = np.zeros(0, dtype=np.float32)
         segments.clear()
         clusterer = SpeakerClusterer(config.SPK_THRESHOLD, config.SPK_PREFIX)
         elapsed_ms = 0.0

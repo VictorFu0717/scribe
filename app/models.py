@@ -38,7 +38,10 @@ async def startup():
                      device=config.DEVICE, disable_update=True,
                      max_end_silence_time=config.VAD_MAX_END_SILENCE_MS,
                      max_single_segment_time=int(config.VAD_MAX_SEGMENT_SEC * 1000))
-    _oai = AsyncOpenAI(base_url=config.VLLM_BASE_URL, api_key=config.VLLM_API_KEY)
+    # timeout 必設:非語音/靜音段會讓 Qwen3-ASR 失控生成,SDK 預設 600s 會把定稿佇列堵死。
+    # max_retries=0:卡住的請求重試只是再等一次,對 localhost 沒有意義。
+    _oai = AsyncOpenAI(base_url=config.VLLM_BASE_URL, api_key=config.VLLM_API_KEY,
+                       timeout=config.FINALIZE_TIMEOUT, max_retries=0)
     if config.ASR_TW:
         try:
             import opencc
@@ -106,8 +109,52 @@ async def preview(chunk, cache, is_final):
         decoder_chunk_look_back=config.DEC_LOOKBACK)
 
 
+def frame_peak_rms(a: np.ndarray, frame_ms: float = 30.0) -> float:
+    """整段音訊中「最大的 30ms 框 RMS」。
+
+    比整段平均 RMS 穩健:一段 15s 裡只有 1s 在講話時,平均 RMS 會被靜音稀釋到很低,
+    用平均值當門檻會誤刪真語音;取最大框則只問「有沒有任何一刻夠大聲」。
+    """
+    if a is None or a.size == 0:
+        return 0.0
+    n = max(1, int(config.SAMPLE_RATE * frame_ms / 1000))
+    x = a.astype(np.float64)
+    if x.size < n:
+        return float(np.sqrt(np.mean(x ** 2)))
+    k = x.size // n
+    fr = x[:k * n].reshape(k, n)
+    return float(np.sqrt((fr ** 2).mean(axis=1)).max())
+
+
+def is_speech_segment(seg: np.ndarray) -> bool:
+    """這段音訊值不值得送定稿?擋掉碎段與近乎無聲的段(理由見 config 的守門區)。"""
+    if seg is None or seg.size == 0:
+        return False
+    if seg.size / config.SAMPLE_RATE * 1000 < config.MIN_SEG_MS:
+        return False
+    return frame_peak_rms(seg) >= config.MIN_SEG_RMS
+
+
+def normalize_segment(seg: np.ndarray) -> np.ndarray:
+    """把小聲的段落放大到目標 RMS(只放大不壓低,增益有上限)。SEG_NORM_RMS=0 關閉。"""
+    if config.SEG_NORM_RMS <= 0 or seg is None or seg.size == 0:
+        return seg
+    rms = float(np.sqrt(np.mean(seg.astype(np.float64) ** 2)))
+    if rms <= 1e-6:
+        return seg
+    gain = min(config.SEG_NORM_RMS / rms, config.SEG_NORM_MAX_GAIN)
+    if gain <= 1.0:
+        return seg                       # 已經夠大聲:不動(壓低救不了削波)
+    out = seg.astype(np.float32) * gain
+    peak = float(np.abs(out).max())
+    if peak > 0.99:                      # 防削波
+        out *= 0.99 / peak
+    return out
+
+
 async def finalize_qwen(seg: np.ndarray) -> str:
-    """一段音訊 → Qwen3-ASR 高準定稿(async,可併發)。"""
+    """一段音訊 → Qwen3-ASR 高準定稿(async,可併發)。送出前做音量正規化。"""
+    seg = normalize_segment(seg)
     bio = io.BytesIO()
     sf.write(bio, seg, config.SAMPLE_RATE, format="WAV", subtype="PCM_16")
     kwargs = {"model": config.QWEN_MODEL, "file": ("seg.wav", bio.getvalue(), "audio/wav")}
