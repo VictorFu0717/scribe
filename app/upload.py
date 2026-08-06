@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import io
 import os
+import tempfile
 
 import librosa
 import numpy as np
@@ -31,9 +32,21 @@ CONCURRENCY = int(os.getenv("UPLOAD_CONCURRENCY", "8"))                 # 同時
 SR = config.SAMPLE_RATE
 
 
-def _load_audio(raw: bytes) -> np.ndarray:
-    """任意音檔 bytes → 16k mono float32(librosa 會自動 resample/降混)。"""
-    audio, _ = librosa.load(io.BytesIO(raw), sr=SR, mono=True)
+def _load_audio(raw: bytes, suffix: str = "") -> np.ndarray:
+    """任意音檔 bytes → 16k mono float32(librosa 會自動 resample/降混)。
+
+    兩段式:先在記憶體解(soundfile 直接吃 wav/flac/ogg/mp3,免磁碟 IO);
+    失敗才落地成暫存檔再解。**手機錄的 m4a/aac 只有後者能解** —— soundfile 不支援
+    m4a,而 librosa 用來救場的 audioread/ffmpeg 後備是 spawn `ffmpeg -i <路徑>`,
+    只吃檔案路徑、吃不了 BytesIO,所以光裝 ffmpeg 而不落地是解不開的。
+    """
+    try:
+        audio, _ = librosa.load(io.BytesIO(raw), sr=SR, mono=True)
+    except Exception:
+        with tempfile.NamedTemporaryFile(suffix=suffix or ".bin") as f:
+            f.write(raw)
+            f.flush()
+            audio, _ = librosa.load(f.name, sr=SR, mono=True)   # 需系統有 ffmpeg
     return audio.astype(np.float32)
 
 
@@ -109,15 +122,20 @@ async def upload_audio(mid: str, background_tasks: BackgroundTasks,
         raise HTTPException(404, "meeting not found")
 
     raw = await file.read()
+    src = f"{file.filename!r} type={file.content_type} {len(raw)} bytes"
     if not raw:
-        raise HTTPException(400, "empty file")
+        print(f"[upload] {mid} 400 empty file: {src}")
+        raise HTTPException(400, f"empty file ({src})")
+    suffix = os.path.splitext(file.filename or "")[1][:10]
     loop = asyncio.get_running_loop()
     try:
-        audio = await loop.run_in_executor(None, _load_audio, raw)
+        audio = await loop.run_in_executor(None, _load_audio, raw, suffix)
     except Exception as e:
-        raise HTTPException(400, f"cannot decode audio (支援 wav/flac/ogg;mp3/m4a 需 ffmpeg): {e}")
+        print(f"[upload] {mid} 400 decode fail: {src} -> {e}")
+        raise HTTPException(400, f"cannot decode audio ({src});m4a/aac 需系統有 ffmpeg: {e}")
     if audio.size == 0:
-        raise HTTPException(400, "decoded audio is empty")
+        print(f"[upload] {mid} 400 decoded empty: {src}")
+        raise HTTPException(400, f"decoded audio is empty ({src})")
 
     await db.set_status(mid, "transcribing")
     background_tasks.add_task(_process, mid, user, audio, diarization)

@@ -85,6 +85,11 @@ app/
 - NVIDIA GPU + driver + [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)（Windows 用 Docker Desktop + WSL2）
 - Docker / Docker Compose v2
 - Python 3.12 + 本 repo 的 `.venv`（已裝 funasr / vllm / qwen-asr / opencc 等）
+- **`ffmpeg`（整檔上傳必備）**：`sudo apt install ffmpeg`。手機錄音預設是 **m4a/aac**，
+  libsndfile 不支援，只能靠 librosa 的 audioread→ffmpeg 後備解碼。缺了會讓
+  `POST /meetings/{id}/audio` 回 **400 cannot decode audio**。
+  ⚠️ 光裝 ffmpeg 還不夠：該後備是 spawn `ffmpeg -i <路徑>`，**只吃檔案路徑、吃不了記憶體物件**，
+  所以 `upload.py` 的 `_load_audio` 會在記憶體解碼失敗時把上傳內容落地成暫存檔再解。
 
 ---
 
