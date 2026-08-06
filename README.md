@@ -104,9 +104,9 @@ ollama serve && ollama pull qwen3.6        # host :11434
 # 3) scribe 主服務
 cd ~/PycharmProjects/websocket_ASR
 .venv/bin/python main.py                                   # 用 vLLM 對話(預設 :8004)
-# 若對話用 Ollama:
+# 若對話用 Ollama(thinking 自動關;keep-alive 常駐避免冷重載):
 CHAT_BASE_URL=http://localhost:11434/v1 CHAT_MODEL=qwen3.6:latest CHAT_API_KEY=ollama \
-  .venv/bin/python main.py                                 # :8005
+  OLLAMA_KEEP_ALIVE=-1 .venv/bin/python main.py            # :8005
 
 # 測試:瀏覽器開 test.html(錄音→逐字→定稿→問這場會議)
 ```
@@ -235,6 +235,9 @@ GET /meetings/{id}/translation?target=en  → {"target","text"}   (未翻過回 
 | `CHAT_BASE_URL` | `http://localhost:8004/v1` | 對話 LLM 服務;用 Ollama 設 `http://localhost:11434/v1` |
 | `CHAT_MODEL` | `Qwen3.6-27B` | 對話模型名;Ollama 設 `qwen3.6:latest` |
 | `CHAT_API_KEY` | `EMPTY` | 對話 LLM 金鑰（Ollama 隨意填如 `ollama`）|
+| `CHAT_BACKEND` | `auto` | 對話後端:`auto`(URL 含 `:11434`→ollama,否則 vllm) / `ollama` / `vllm`。決定「關 thinking」與 API 呼叫方式（見下方說明）|
+| `CHAT_THINK` | `0` | 是否開 thinking。`0`=關（預設,快;會議任務不需深度推理）、`1`=開 |
+| `OLLAMA_KEEP_ALIVE` | `30m` | (ollama 後端) 每次呼叫帶入,模型保留多久;設 `-1`=永久保留（根治 36B 冷重載 ~90s） |
 | `SCRIBE_DB` | `scribe.db` | SQLite 資料庫路徑（含 sqlite-vec 向量表）|
 | `DEFAULT_USER` | `dev` | 開發期預設 user_id（auth ⑦ 前的多租戶佔位）|
 | `EMBED_BASE_URL` | `http://localhost:11434/v1` | Embedding 服務（預設 Ollama）|
@@ -260,6 +263,19 @@ GET /meetings/{id}/translation?target=en  → {"target","text"}   (未翻過回 
 | `SPK_THRESHOLD` | `0.5` | 同語者 cosine 門檻（越高越嚴、越容易判成新語者）|
 | `SPK_PREFIX` | `說話者` | 語者標籤前綴 |
 | `PORT` | `8005` | scribe 埠 |
+
+### 對話後端與 thinking（重要）
+
+摘要/翻譯/QA/助理全走 `app/llm.py` 的統一層,依 `CHAT_BACKEND` 自動選對後端與「關 thinking」的方式——**兩邊機制不可互通**（實測 2026-08，Ollama qwen3.6）:
+
+| 後端 | 關 thinking 的方式 | API |
+|------|------|-----|
+| **vLLM** | `chat_template_kwargs.enable_thinking=False` | `/v1`(OpenAI 相容) |
+| **Ollama** | 原生 `think:False` | **`/api/chat`**（`/v1` 端點會**忽略** `enable_thinking` 與 `think`，關不掉！）|
+
+- Qwen3 的 thinking 實質是**開/關二元,沒有 low/med/high 檔位**;想「短思考」不可行,實務就是關掉（`CHAT_THINK=0`）。
+- 切後端只改 `CHAT_BASE_URL`（或強制 `CHAT_BACKEND`），**程式不用動**;對外 SSE 契約不變。
+- Ollama 若回應慢多半是 **36B 模型被踢出重載**（非 thinking）→ 設 `OLLAMA_KEEP_ALIVE=-1` 常駐。
 
 ---
 

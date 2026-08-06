@@ -10,15 +10,11 @@ import json
 
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
-from openai import AsyncOpenAI
 from pydantic import BaseModel
 
-from app import config
-
-CHAT_ENABLE_THINKING = False   # 會議 QA 求快求穩,關掉 thinking
+from app import llm
 
 router = APIRouter()
-_chat = AsyncOpenAI(base_url=config.CHAT_BASE_URL, api_key=config.CHAT_API_KEY)
 
 SYSTEM_PROMPT = """你是專業的會議記錄助理。下面是一場會議的逐字稿。
 請「只根據逐字稿內容」回答使用者的問題,並遵守:
@@ -57,16 +53,8 @@ async def meeting_chat(req: MeetingChatReq):
 
     async def gen():
         try:
-            stream = await _chat.chat.completions.create(
-                model=config.CHAT_MODEL, messages=messages, stream=True, temperature=0.3,
-                extra_body={"chat_template_kwargs": {"enable_thinking": CHAT_ENABLE_THINKING}},
-            )
-            async for chunk in stream:
-                if not chunk.choices:
-                    continue
-                piece = getattr(chunk.choices[0].delta, "content", None)
-                if piece:
-                    yield f"data: {json.dumps({'delta': piece}, ensure_ascii=False)}\n\n"
+            async for piece in llm.stream(messages, temperature=0.3):   # thinking 由後端統一控(預設關)
+                yield f"data: {json.dumps({'delta': piece}, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"

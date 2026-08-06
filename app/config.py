@@ -41,6 +41,11 @@ CHUNK_MS = int(CHUNK_STRIDE / SAMPLE_RATE * 1000)
 CHAT_BASE_URL = os.getenv("CHAT_BASE_URL", "http://localhost:8004/v1")
 CHAT_API_KEY = os.getenv("CHAT_API_KEY", "EMPTY")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "Qwen3.6-27B")
+# 後端:auto(:11434→ollama,否則 vllm) | ollama | vllm。決定「關 thinking」與 API 呼叫方式:
+#   vllm → /v1 + chat_template_kwargs.enable_thinking;ollama → /api/chat + think。
+CHAT_BACKEND = os.getenv("CHAT_BACKEND", "auto")
+CHAT_THINK = os.getenv("CHAT_THINK", "0") in ("1", "true", "True")   # 預設關 thinking(快;會議任務不需深度推理)
+OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "30m")            # ollama 原生呼叫帶,避免模型被踢出重載
 
 # --- Embedding (⑥ RAG;預設 Ollama bge-m3) ---
 EMBED_BASE_URL = os.getenv("EMBED_BASE_URL", "http://localhost:11434/v1")

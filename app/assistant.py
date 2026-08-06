@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app import config, db, llm, rag
+from app import db, llm, rag
 from app.auth import get_current_user
 
 router = APIRouter(tags=["assistant"])
@@ -118,42 +118,24 @@ async def assistant_chat(req: AssistantReq, user: str = Depends(get_current_user
     async def gen():
         try:
             for _ in range(MAX_STEPS):
-                stream = await llm.client.chat.completions.create(
-                    model=config.CHAT_MODEL, messages=messages, tools=TOOLS,
-                    stream=True, temperature=0.3,
-                    extra_body={"chat_template_kwargs": {"enable_thinking": False}})
+                # 後端無關:llm.chat_stream 內部依 ollama/vllm 各自關 thinking + 帶 tools
                 content = ""
-                acc: dict = {}   # index -> {id,name,args}
-                async for ch in stream:
-                    if not ch.choices:
-                        continue
-                    d = ch.choices[0].delta
-                    if d.content:
-                        content += d.content
-                        yield _sse({"delta": d.content})
-                    if d.tool_calls:
-                        for tc in d.tool_calls:
-                            e = acc.setdefault(tc.index, {"id": "", "name": "", "args": ""})
-                            if tc.id:
-                                e["id"] = tc.id
-                            if tc.function:
-                                if tc.function.name:
-                                    e["name"] += tc.function.name
-                                if tc.function.arguments:
-                                    e["args"] += tc.function.arguments
+                calls: list = []
+                async for ev in llm.chat_stream(messages, tools=TOOLS, temperature=0.3):
+                    if ev["type"] == "content":
+                        content += ev["text"]
+                        yield _sse({"delta": ev["text"]})
+                    elif ev["type"] == "tool_calls":
+                        calls = ev["calls"]
 
-                if not acc:
+                if not calls:
                     return   # 沒有工具呼叫 → content 就是最終答案(已串流)
 
-                # 記錄 assistant 的 tool_calls,再逐一執行、把結果餵回
-                messages.append({
-                    "role": "assistant", "content": content or None,
-                    "tool_calls": [{"id": e["id"], "type": "function",
-                                    "function": {"name": e["name"], "arguments": e["args"]}}
-                                   for e in acc.values()]})
-                for e in acc.values():
-                    result = await _run_tool(e["name"], e["args"], user)
-                    messages.append({"role": "tool", "tool_call_id": e["id"], "content": result})
+                # 記錄 assistant 的 tool_calls,再逐一執行、把結果餵回(訊息格式依後端)
+                messages.append(llm.assistant_tool_msg(content, calls))
+                for c in calls:
+                    result = await _run_tool(c["name"], c["arguments"], user)
+                    messages.append(llm.tool_result_msg(c, result))
             # 迴圈用盡仍沒收斂
             yield _sse({"delta": "\n(已達工具呼叫上限)"})
         except Exception as ex:
