@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app import db, llm, rag
+from app import config, db, llm, rag
 from app.auth import get_current_user
 
 router = APIRouter(tags=["assistant"])
@@ -82,12 +82,13 @@ async def _run_tool(name: str, args_str: str, user: str) -> str:
                             "created_at": m["created_at"], "status": m["status"]}
                            for m in ms], ensure_ascii=False)
     if name == "search_meetings":
+        search = rag.hybrid_search if config.RAG_HYBRID else rag.semantic_search
         try:
-            rows = await rag.semantic_search(user, args.get("query", ""),
-                                             date_from=args.get("date_from"),
-                                             date_to=args.get("date_to"))
+            rows = await search(user, args.get("query", ""),
+                                date_from=args.get("date_from"),
+                                date_to=args.get("date_to"))
         except Exception:
-            rows = await db.search_transcripts(user, args.get("query", ""))   # 退回關鍵字
+            rows = await db.search_transcripts(user, args.get("query", ""))   # 兩側都掛才退回
         rows = [{k: v for k, v in r.items() if k != "distance"} for r in rows]
         return json.dumps(rows, ensure_ascii=False) if rows else "(找不到相關會議)"
     return f"未知工具:{name}"

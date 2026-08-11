@@ -18,7 +18,7 @@ MAX_SEG_SEC = float(os.getenv("MAX_SEG_SEC", "20"))   # ws 端安全切段(VAD �
 # VAD 斷句停頓門檻(ms):停頓超過這麼久才斷句。權衡:
 #   太大(fsmn 預設 800)→ 一段混多人 → 語者判錯;太小(350)→ 句內小停頓也切、句子被切碎。
 #   500 是甜蜜點(抓句尾停頓、不抓句內猶豫)。語者還分不夠細→調小(400);句子還被切碎→調大(600~700)。
-VAD_MAX_END_SILENCE_MS = int(os.getenv("VAD_MAX_END_SILENCE_MS", "550"))
+VAD_MAX_END_SILENCE_MS = int(os.getenv("VAD_MAX_END_SILENCE_MS", "600"))
 VAD_MAX_SEGMENT_SEC = float(os.getenv("VAD_MAX_SEGMENT_SEC", "15"))   # 單段上限(fsmn 預設 60s→15s)
 ASR_TW = os.getenv("ASR_TRADITIONAL", "1") not in ("0", "false", "False", "")
 
@@ -81,6 +81,14 @@ EMBED_API_KEY = os.getenv("EMBED_API_KEY", "ollama")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "bge-m3")
 EMBED_DIM = int(os.getenv("EMBED_DIM", "1024"))
 RAG_CHUNK_CHARS = int(os.getenv("RAG_CHUNK_CHARS", "400"))   # 逐字稿切塊字元數
+# hybrid 檢索的 RRF 常數:score = Σ 1/(K + 名次)。K 越大 → 各來源的名次差異被壓平、越像投票;
+# 越小 → 越偏袒各自的第一名。60 是文獻慣用值。
+RAG_RRF_K = int(os.getenv("RAG_RRF_K", "60"))
+# 檢索策略。**預設純向量**:實測 hybrid 在測試語料上與純向量打平(Top-1 5/6 vs 5/6;
+# 罕見識別碼 4/4 vs 4/4)—— bge-m3 對中文專有名詞已經夠強,量測不到品質提升,
+# 故不預設啟用。設 1 可開 hybrid(向量+FTS5 關鍵字 RRF),好處是韌性:embedding 服務掛掉、
+# 或某些內容 embedding 不了(bge-m3 對特定文字會回 NaN)時,關鍵字側仍搜得到。
+RAG_HYBRID = os.getenv("RAG_HYBRID", "0") not in ("0", "false", "False", "")
 
 # --- 儲存 ---
 DB_PATH = os.getenv("SCRIBE_DB", "scribe.db")

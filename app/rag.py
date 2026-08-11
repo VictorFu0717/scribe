@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from app import config, db, embed as _embed
 
 
@@ -35,22 +37,85 @@ async def index_meeting(user_id: str, meeting_id: str):
     chunks = _chunk_segments(segs, config.RAG_CHUNK_CHARS)
     if not chunks:
         return
-    embs = await _embed.embed(chunks)
-    await db.store_chunks(user_id, meeting_id,
-                          [{"seq": i, "text": chunks[i], "embedding": embs[i]}
-                           for i in range(len(chunks))])
+    try:
+        embs = await _embed.embed(chunks)
+        if not all(_embed.is_valid(e) for e in embs):
+            raise ValueError("embedding 含 NaN/inf")
+    except Exception as e:
+        # 整批失敗(常見於某一塊觸發 bge-m3 的 NaN)→ 逐筆重試,只丟掉真正壞的那幾塊
+        print(f"[rag] {meeting_id} 整批 embedding 失敗({e}),改逐筆重試")
+        embs = await _embed.embed_each(chunks)
+    # embedding 壞掉的塊仍然寫入(embedding=None):不進向量表,但關鍵字檢索照樣搜得到
+    rows = [{"seq": i, "text": chunks[i],
+             "embedding": embs[i] if _embed.is_valid(embs[i]) else None}
+            for i in range(len(chunks))]
+    bad = sum(1 for r in rows if r["embedding"] is None)
+    if bad:
+        print(f"[rag] {meeting_id} 有 {bad}/{len(rows)} 塊無法 embedding,僅建關鍵字索引")
+    await db.store_chunks(user_id, meeting_id, rows)
+
+
+def _in_range(h, date_from, date_to) -> bool:
+    if not (date_from or date_to):
+        return True
+    lo = date_from or ""
+    hi = (date_to + "T23:59:59Z") if date_to else "9999"
+    return lo <= (h.get("created_at") or "") <= hi
 
 
 async def semantic_search(user_id: str, query: str, k: int = 6,
                           date_from: str | None = None, date_to: str | None = None) -> list[dict]:
-    """語意檢索;date_from/date_to 為 YYYY-MM-DD(含)日期範圍過濾(依會議 created_at)。"""
+    """純語意檢索;date_from/date_to 為 YYYY-MM-DD(含)日期範圍過濾(依會議 created_at)。"""
     if not (query or "").strip():
         return []
     qemb = (await _embed.embed([query]))[0]
     over = k * 4 if (date_from or date_to) else k
     hits = await db.vector_search(user_id, qemb, over)
-    if date_from or date_to:
-        lo = date_from or ""
-        hi = (date_to + "T23:59:59Z") if date_to else "9999"
-        hits = [h for h in hits if lo <= (h.get("created_at") or "") <= hi]
-    return hits[:k]
+    return [h for h in hits if _in_range(h, date_from, date_to)][:k]
+
+
+async def hybrid_search(user_id: str, query: str, k: int = 6,
+                        date_from: str | None = None, date_to: str | None = None) -> list[dict]:
+    """向量 + 關鍵字 混合檢索,以 RRF(Reciprocal Rank Fusion)合併。
+
+    兩者互補:向量擅長「意思相近但用詞不同」(問『營收表現』命中『這季賺了多少』),
+    關鍵字擅長「專有名詞精確比對」(健保署、長照2.0、人名)—— 這類詞的 embedding
+    常被周圍語意稀釋,正是純向量最容易漏掉的。
+
+    RRF 只用「名次」而非分數,所以不必去校正 cosine 距離與 bm25 兩種不同尺度:
+        score(doc) = Σ 1/(RRF_K + rank_i)
+    任一側失敗(例如 embedding 服務掛了)仍以另一側的結果作答,不整個壞掉。
+    """
+    q = (query or "").strip()
+    if not q:
+        return []
+    over = k * 4 if (date_from or date_to) else k * 2
+
+    async def _vec():
+        try:
+            qemb = (await _embed.embed([q]))[0]
+            return await db.vector_search(user_id, qemb, over)
+        except Exception:
+            return []
+
+    async def _kw():
+        try:
+            return await db.keyword_search(user_id, q, over)
+        except Exception:
+            return []
+
+    vec_hits, kw_hits = await asyncio.gather(_vec(), _kw())
+
+    fused: dict = {}
+    for hits in (vec_hits, kw_hits):
+        for rank, h in enumerate(hits):
+            if not _in_range(h, date_from, date_to):
+                continue
+            key = (h.get("meeting_id"), h.get("snippet"))
+            row = fused.setdefault(key, {**h, "_score": 0.0})
+            row["_score"] += 1.0 / (config.RAG_RRF_K + rank + 1)
+    out = sorted(fused.values(), key=lambda r: -r["_score"])[:k]
+    for r in out:
+        r.pop("_score", None)
+        r.pop("distance", None)
+    return out

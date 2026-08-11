@@ -280,6 +280,8 @@ GET /meetings/{id}/translation?target=en  → {"target","text"}   (未翻過回 
 | `EMBED_MODEL` | `bge-m3` | Embedding 模型（1024 維）|
 | `EMBED_DIM` | `1024` | 向量維度（換模型要一起改）|
 | `RAG_CHUNK_CHARS` | `400` | 逐字稿切塊字元數 |
+| `RAG_HYBRID` | `0` | `0`=**純向量（預設）**；`1`=向量＋關鍵字 RRF 混合。實測混合未帶來品質提升，見下方 |
+| `RAG_RRF_K` | `60` | RRF 常數：`score = Σ 1/(K + 名次)`。越大越像投票、越小越偏袒各自第一名 |
 | `TRANSLATE_MAP_CHARS` | `3000` | 留檔翻譯:超過此長度就分段翻 |
 | `AUTH_MODE` | `jwt` | 身分來源:`jwt`(帳密登入,預設;WiFi+Tailscale 混用一致身分) 或 `tailscale`(whois,純 tailnet 才適用) |
 | `AUTH_SECRET` | `dev-insecure...` | JWT 簽章密鑰（`jwt` 模式;**正式務必覆寫**,>=32 bytes）|
@@ -367,6 +369,29 @@ GET /meetings/{id}/translation?target=en  → {"target","text"}   (未翻過回 
 - [x] **④ 摘要**（`POST /meetings/{id}/summarize`，SSE + 結構化 JSON，長逐字稿 map-reduce）
 - [x] **⑤ agentic 助理**（`POST /assistant/chat`，手寫 loop + 工具:get_transcript/get_summary/list/search）
 - [x] **⑥ RAG**（sqlite-vec + bge-m3 語意檢索;定稿/上傳後自動索引;多租戶 user_id 分區 + 日期過濾）
+- [x] **hybrid 檢索**（向量 + FTS5 關鍵字，RRF 合併）—— 見下方說明
+
+### hybrid 檢索（向量 + 關鍵字）— **預設關閉，`RAG_HYBRID=1` 開啟**
+
+實測未帶來檢索品質提升（數據見下），故預設走純向量；程式與 FTS 索引都保留，隨時可切換。
+
+`rag.hybrid_search()` 同時跑兩側再以 RRF 合併：`score = Σ 1/(RRF_K + 名次)`。只用名次、不用分數，
+所以不必去校正 cosine 距離與 bm25 兩種尺度；任一側失敗（例：embedding 服務掛了）仍以另一側作答。
+
+⚠️ **中文 FTS5 必須用 `trigram` 分詞器**：預設的 `unicode61` 對中文完全無效（中文沒有空白，
+整串變成單一 token，實測查「健保署」「預算成長」都是 **0 筆**）。查詢端也要對應處理 ——
+中文取 **3 字滑窗**（「健保署預算」→ 健保署／保署預／署預算）；trigram 需 ≥3 字，
+所以 2 字查詢（如「長照」）拆不出詞 → **退回 `LIKE` 子字串比對**，否則會靜默回空。
+
+**實測誠實結論**：在我建的測試語料上（24 場、含高度相似的干擾），hybrid 與純向量**打平**
+（Top-1 各 5/6；罕見識別碼 NC-2731／人名／法規條號／EIP-Portal 也是各 4/4）——
+bge-m3 對中文專有名詞本來就夠強，**沒有量測到檢索品質的提升**。
+
+hybrid 目前**已證實**的價值是**韌性**：
+- embedding 服務掛掉 → 關鍵字側照樣作答
+- **某些內容根本 embedding 不了**：實測 bge-m3(Ollama) 會對特定文字組合回 `NaN` 而讓整個請求 500，
+  可 100% 重現、且**同批其他文字會被一起拖下水**。這類塊仍會寫入 `chunks`+`fts_chunks`（只是不進向量表），
+  **靠關鍵字側仍搜得到**（已驗證：向量側完全找不到，hybrid 救回）。
 - [x] 整段錄音上傳轉錄（`POST /meetings/{id}/audio`，背景批次）
 - [x] **⑦ 身分辨識**（`AUTH_MODE`:jwt=帳密登入(預設;WiFi+Tailscale 混用一致身分) / tailscale=whois(純 tailnet 選用)）
 - [ ] 帳號審核制 + admin 管理（產品化時;register→待審→核准）

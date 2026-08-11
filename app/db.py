@@ -84,6 +84,19 @@ async def init_db():
             "CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0("
             f"user_id text partition key, embedding float[{config.EMBED_DIM}])")
         await db.commit()
+        # hybrid 檢索的關鍵字側:FTS5 + **trigram** 分詞(rowid = chunks.id)。
+        # 預設的 unicode61 對中文完全無效 —— 中文沒有空白,整串會變成單一 token,
+        # 實測查「健保署」「預算成長」都是 0 筆。trigram 以 3 字滑窗建索引才搜得到。
+        await db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks "
+                         "USING fts5(text, tokenize='trigram')")
+        # 舊資料庫回填(⑥ 之前建的 chunks 沒有 FTS 列)
+        cur = await db.execute("SELECT (SELECT count(*) FROM chunks), "
+                               "(SELECT count(*) FROM fts_chunks)")
+        n_chunks, n_fts = await cur.fetchone()
+        if n_chunks and not n_fts:
+            await db.execute("INSERT INTO fts_chunks(rowid, text) SELECT id, text FROM chunks")
+            print(f"[db] FTS 回填 {n_chunks} 塊")
+        await db.commit()
     print(f"[db] ready: {config.DB_PATH}")
 
 
@@ -169,7 +182,11 @@ async def delete_meeting(user_id: str, mid: str) -> bool:
 
 # ---- 向量索引 (⑥ RAG, sqlite-vec) ----
 async def store_chunks(user_id: str, meeting_id: str, chunks: list[dict]):
-    """先刪該會議舊塊,再存入新塊(chunks:{seq,text,embedding})。vec rowid = chunks.id。"""
+    """先刪該會議舊塊,再存入新塊(chunks:{seq,text,embedding})。vec rowid = chunks.id。
+
+    embedding 為 None 的塊仍會寫入 chunks + fts_chunks,只是不進向量表 ——
+    這樣「embedding 失敗的內容」至少關鍵字檢索還找得到(hybrid 的好處之一)。
+    """
     await delete_chunks(meeting_id)
     conn = await _connect_vec()
     try:
@@ -178,9 +195,12 @@ async def store_chunks(user_id: str, meeting_id: str, chunks: list[dict]):
                 "INSERT INTO chunks(user_id,meeting_id,seq,text) VALUES(?,?,?,?)",
                 (user_id, meeting_id, ch["seq"], ch["text"]))
             cid = cur.lastrowid
-            await conn.execute(
-                "INSERT INTO vec_chunks(rowid,user_id,embedding) VALUES(?,?,?)",
-                (cid, user_id, _pack(ch["embedding"])))
+            if ch.get("embedding") is not None:
+                await conn.execute(
+                    "INSERT INTO vec_chunks(rowid,user_id,embedding) VALUES(?,?,?)",
+                    (cid, user_id, _pack(ch["embedding"])))
+            await conn.execute("INSERT INTO fts_chunks(rowid,text) VALUES(?,?)",
+                               (cid, ch["text"]))
         await conn.commit()
     finally:
         await conn.close()
@@ -193,6 +213,7 @@ async def delete_chunks(meeting_id: str):
         ids = [r[0] for r in await cur.fetchall()]
         for cid in ids:
             await conn.execute("DELETE FROM vec_chunks WHERE rowid=?", (cid,))
+            await conn.execute("DELETE FROM fts_chunks WHERE rowid=?", (cid,))
         await conn.execute("DELETE FROM chunks WHERE meeting_id=?", (meeting_id,))
         await conn.commit()
     finally:
@@ -281,6 +302,60 @@ async def get_transcript(user_id: str, mid: str) -> list[dict] | None:
             "SELECT * FROM transcript_segments WHERE meeting_id=? ORDER BY seq", (mid,))
         return [{"id": f"s{r['seq']}", "text": r["text"], "speaker": r["speaker"],
                  "is_final": True, "start_ms": r["start_ms"], "end_ms": r["end_ms"]}
+                for r in await cur.fetchall()]
+
+
+def fts_terms(query: str, max_terms: int = 24) -> list[str]:
+    """把查詢拆成可餵給 trigram FTS5 的詞。
+
+    中文沒有空白可切,又不想引進斷詞器(字典外的專有名詞如「長照2.0」反而切不好),
+    所以對中文字串取 **3 字滑窗**:「健保署預算」→ 健保署 / 保署預 / 署預算。
+    雜訊窗(保署預)幾乎不會命中,bm25 又會壓低常見窗的權重,實際上等同「字元三元組檢索」。
+    英數詞(>=3)直接當一個詞。
+    """
+    import re
+    out: list[str] = []
+    for w in re.findall(r"[A-Za-z0-9_]{3,}", query or ""):
+        out.append(w.lower())
+    for run in re.findall(r"[^\x00-\x7f]{3,}", query or ""):     # 連續非 ASCII(中文等)
+        for i in range(len(run) - 2):
+            out.append(run[i:i + 3])
+    seen, uniq = set(), []
+    for t in out:
+        if t not in seen:
+            seen.add(t); uniq.append(t)
+    return uniq[:max_terms]
+
+
+async def keyword_search(user_id: str, query: str, k: int = 8) -> list[dict]:
+    """關鍵字檢索(FTS5 trigram + bm25),多租戶以 chunks.user_id 過濾。
+
+    trigram 需要 >=3 字元;查詢過短(如「長照」)拆不出詞 → 退回 LIKE 子字串比對,
+    否則那類查詢會靜默回空,反而比原本的 LIKE 還差。
+    """
+    q = (query or "").strip()
+    if not q:
+        return []
+    terms = fts_terms(q)
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if terms:
+            expr = " OR ".join(f'"{t}"' for t in terms)   # 雙引號:避免 FTS5 語法字元
+            cur = await db.execute(
+                "SELECT c.meeting_id, c.text AS snippet, m.title, m.created_at, "
+                "       bm25(fts_chunks) AS score "
+                "FROM fts_chunks f JOIN chunks c ON c.id = f.rowid "
+                "JOIN meetings m ON m.id = c.meeting_id "
+                "WHERE fts_chunks MATCH ? AND c.user_id = ? "
+                "ORDER BY score LIMIT ?", (expr, user_id, k))
+        else:
+            cur = await db.execute(
+                "SELECT c.meeting_id, c.text AS snippet, m.title, m.created_at, 0 AS score "
+                "FROM chunks c JOIN meetings m ON m.id = c.meeting_id "
+                "WHERE c.user_id = ? AND c.text LIKE ? "
+                "ORDER BY m.created_at DESC LIMIT ?", (user_id, f"%{q}%", k))
+        return [{"meeting_id": r["meeting_id"], "title": r["title"],
+                 "created_at": r["created_at"], "snippet": r["snippet"]}
                 for r in await cur.fetchall()]
 
 
