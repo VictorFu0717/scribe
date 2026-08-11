@@ -23,7 +23,7 @@ from fastapi import (APIRouter, BackgroundTasks, Depends, File, Form,
 
 from app import config, db, models, rag
 from app.auth import get_current_user
-from app.diarize import SpeakerClusterer
+from app.diarize import assign_all
 
 router = APIRouter(tags=["upload"])
 
@@ -89,13 +89,17 @@ async def _process(mid: str, user: str, audio: np.ndarray, diarize: bool):
 
         texts = await asyncio.gather(*[fin(c) for c in clips])
 
-        # 說話者:依時間順序分群(assign 會更新中心,需序列化)
+        # 說話者:離線「全域」分群。整份音訊都在手上,不必像即時串流那樣邊來邊判、
+        # 一次定案不可回頭 —— 先收集全部聲紋,再一次看完決定分組(見 diarize.cluster_offline)。
         speakers = [None] * len(segs)
         if diarize:
-            cl = SpeakerClusterer(config.SPK_THRESHOLD, config.SPK_PREFIX)
-            for i, clip in enumerate(clips):
-                if clip.size and texts[i].strip():
-                    speakers[i] = cl.assign(await models.spk_embed(clip))
+            idxs = [i for i, c in enumerate(clips) if c.size and texts[i].strip()]
+            embs = [await models.spk_embed(clips[i]) for i in idxs]   # spk_embed 內部有鎖,序列即可
+            durs = [(segs[i][1] - segs[i][0]) / 1000.0 for i in idxs]
+            labels, _, _ = assign_all(embs, durs, config.SPK_THRESHOLD,
+                                      config.SPK_PREFIX, config.SPK_MIN_NEW_SEC)
+            for i, label in zip(idxs, labels):
+                speakers[i] = label
 
         result = [{"text": models.to_tw(texts[i]), "speaker": speakers[i],
                    "start_ms": int(segs[i][0]), "end_ms": int(segs[i][1])}

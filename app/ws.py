@@ -25,6 +25,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app import config, db, models, rag
 from app.auth import decode_jwt, tailscale_whois
 from app.diarize import SpeakerClusterer
+from app.diarize import assign_all as diarize_assign_all
 
 router = APIRouter()
 
@@ -56,7 +57,10 @@ async def ws_asr(ws: WebSocket):
     cur_preview = ""
     pad_tail = np.zeros(0, dtype=np.float32)   # 上一段的尾巴,補到下一段前面當 lead-in
     diarize_on = config.DIARIZE_DEFAULT
-    clusterer = SpeakerClusterer(config.SPK_THRESHOLD, config.SPK_PREFIX)
+    clusterer = SpeakerClusterer(config.SPK_THRESHOLD, config.SPK_PREFIX,
+                                 config.SPK_MIN_NEW_SEC)
+    spk_hist: list = []                 # [(segment idx, embedding, 真實秒數)] 供定期重分群
+    spk_seen = 0                        # 上次重分群時的 spk_hist 長度
 
     # ② 儲存關聯 / 時間軸
     meeting_id = None
@@ -118,7 +122,11 @@ async def ws_asr(ws: WebSocket):
                     if diarize_on and seg.size:
                         try:
                             emb = await models.spk_embed(seg)
-                            segments[idx]["speaker"] = clusterer.assign(emb)
+                            s0 = segments[idx]
+                            dur = (s0["end_ms"] - s0["start_ms"]) / 1000.0   # 真實長度(不含 padding)
+                            segments[idx]["speaker"] = clusterer.assign(emb, dur)
+                            spk_hist.append((idx, emb, dur))
+                            await recluster_speakers()
                         except Exception as e:
                             await send({"type": "error", "detail": f"diarize: {e}"})
                     await push_partial()
@@ -135,6 +143,42 @@ async def ws_asr(ws: WebSocket):
                     await send({"type": "error", "detail": f"segment: {e}"})
             finally:
                 fin_queue.task_done()
+
+    async def recluster_speakers(force: bool = False):
+        """(B) 每累積 N 段就回頭全域重分群,修正先前判錯的語者標籤。
+
+        線上貪婪是一次定案不可回頭:第 3 段判錯,後面所有證據都救不回它。這裡定期
+        用全部已累積的聲紋重跑全域分群 → 改寫既有 segments 的標籤 → 同步更新 DB。
+        WS 每次 partial 本來就重送整個 segments 陣列,App 會自動換成新標籤。
+        重分群後把中心餵回 clusterer,讓後續線上判定與新編號一致。
+        """
+        every = config.SPK_RECLUSTER_EVERY
+        nonlocal spk_seen
+        if not spk_hist or (not force and (every <= 0 or len(spk_hist) - spk_seen < every)):
+            return
+        spk_seen = len(spk_hist)
+        labels, cents, counts = diarize_assign_all(
+            [e for _, e, _ in spk_hist], [d for _, _, d in spk_hist],
+            config.SPK_THRESHOLD, config.SPK_PREFIX, config.SPK_MIN_NEW_SEC)
+        clusterer.load_state(cents, counts)
+        changed = []
+        for (idx, _, _), lab in zip(spk_hist, labels):
+            if segments[idx].get("speaker") != lab:
+                segments[idx]["speaker"] = lab
+                changed.append(idx)
+        if not changed:
+            return
+        if meeting_id:
+            for idx in changed:                      # 同步既有 DB 列的語者
+                s = segments[idx]
+                if (s.get("text") or "").strip():
+                    try:
+                        await db.upsert_segment(
+                            meeting_id, seg_base + idx, models.to_tw(s["text"]),
+                            s.get("speaker"), s.get("start_ms"), s.get("end_ms"))
+                    except Exception as e:
+                        await send({"type": "error", "detail": f"persist: {e}"})
+        await push_partial()
 
     fin_task = asyncio.create_task(finalizer())
 
@@ -195,7 +239,7 @@ async def ws_asr(ws: WebSocket):
 
     def reset_all():
         nonlocal pf_cache, vad_cache, audio_buf, seg_samples, seg_dur
-        nonlocal cur_preview, clusterer, elapsed_ms, seg_start_ms, pad_tail
+        nonlocal cur_preview, clusterer, elapsed_ms, seg_start_ms, pad_tail, spk_seen
         pf_cache = {}
         vad_cache = {}
         audio_buf = np.zeros(0, dtype=np.float32)
@@ -204,7 +248,10 @@ async def ws_asr(ws: WebSocket):
         cur_preview = ""
         pad_tail = np.zeros(0, dtype=np.float32)
         segments.clear()
-        clusterer = SpeakerClusterer(config.SPK_THRESHOLD, config.SPK_PREFIX)
+        clusterer = SpeakerClusterer(config.SPK_THRESHOLD, config.SPK_PREFIX,
+                                     config.SPK_MIN_NEW_SEC)
+        spk_hist.clear()
+        spk_seen = 0
         elapsed_ms = 0.0
         seg_start_ms = 0.0
 
@@ -268,6 +315,7 @@ async def ws_asr(ws: WebSocket):
                         audio_buf = np.zeros(0, dtype=np.float32)
                     close_segment()
                     await fin_queue.join()      # 等最後一句定稿 + 寫入 DB
+                    await recluster_speakers(force=True)   # 收尾:用全部聲紋做最後一次修正
                     await finalize_meeting()    # 設 ready + 索引(逐字稿早已逐句寫好)
                     await send({"type": "final", "text": committed_str(),
                                 "segments": seg_list(), "meeting_id": meeting_id})

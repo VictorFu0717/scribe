@@ -49,6 +49,13 @@ SPK_MODEL = os.getenv("SPK_MODEL", "funasr/campplus")   # ERes2NetV2: iic/speech
 SPK_HUB = os.getenv("SPK_HUB", FUNASR_HUB)
 SPK_THRESHOLD = float(os.getenv("SPK_THRESHOLD", "0.5"))
 SPK_PREFIX = os.getenv("SPK_PREFIX", "說話者")
+# 短於此的段不得「新增語者」(只能歸入最像的既有語者)。實測 CAM++ 聲紋對段長極敏感:
+#   同一人 cos 在 3.0s 是 0.67(0% 誤判)、2.0s 0.56(27%)、1.0s 0.37(80%)、0.3s 0.18(99%),
+#   而不同人始終 0.07~0.16 → 短段的同人/異人分布完全重疊,調門檻救不了,
+#   只能不讓它生出新語者(否則每個短句一個幽靈語者,即「語者變很多」)。
+SPK_MIN_NEW_SEC = float(os.getenv("SPK_MIN_NEW_SEC", "2.0"))
+# 即時串流每累積這麼多段就回頭全域重分群一次(修正先前判錯的標籤);0=關。
+SPK_RECLUSTER_EVERY = int(os.getenv("SPK_RECLUSTER_EVERY", "10"))
 
 # --- 音訊 / 串流參數 ---
 SAMPLE_RATE = 16000                 # 協定固定 16k;client 需自行 resample
