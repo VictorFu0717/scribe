@@ -21,9 +21,9 @@ import numpy as np
 from fastapi import (APIRouter, BackgroundTasks, Depends, File, Form,
                      HTTPException, UploadFile)
 
-from app import config, db, models, rag
+from app import config, db, models, pyannote_diar, rag
 from app.auth import get_current_user
-from app.diarize import assign_all
+from app.diarize import assign_all, build_spans, labels_from_timeline
 
 router = APIRouter(tags=["upload"])
 
@@ -65,18 +65,75 @@ def _cap_segments(segs: list, max_ms: int) -> list:
     return out
 
 
+def _quietest(audio: np.ndarray, b_ms: int, e_ms: int) -> int:
+    """在 [b,e] 的中段找最安靜的 100ms,當作切點(比盲切不容易切在字中間)。"""
+    lo, hi = b_ms + (e_ms - b_ms) // 4, e_ms - (e_ms - b_ms) // 4
+    win = int(SR * 0.1)
+    best, best_r = (lo + hi) // 2, None
+    for t in range(lo, max(lo + 1, hi), 100):
+        seg = audio[int(t * SR / 1000):int(t * SR / 1000) + win]
+        if seg.size == 0:
+            continue
+        r = float(np.sqrt((seg.astype(np.float64) ** 2).mean()))
+        if best_r is None or r < best_r:
+            best, best_r = t, r
+    return best
+
+
+def _split_long(audio: np.ndarray, spans: list, max_ms: int) -> list:
+    """A2:把超過 max_ms 的發言切開(同一人講很久 → ASR 太長、定稿延遲高)。"""
+    out = []
+    for b, e, lab in spans:
+        stack = [(b, e)]
+        while stack:
+            s0, e0 = stack.pop(0)
+            if e0 - s0 <= max_ms:
+                out.append((s0, e0, lab))
+            else:
+                cut = _quietest(audio, s0, e0)
+                stack = [(s0, cut), (cut, e0)] + stack
+    return sorted(out, key=lambda x: x[0])
+
+
 async def _process(mid: str, user: str, audio: np.ndarray, diarize: bool):
     """背景:VAD → 併發定稿 → (可選)語者分群 → 寫入儲存 → 建向量索引。"""
     try:
-        raw_segs = await models.vad_offline(audio)
-        segs = _cap_segments(raw_segs, MAX_SEG_MS)
-        if not segs:                       # VAD 沒切到 → 整段當一段
-            segs = [[0, int(audio.size / SR * 1000)]]
+        # 語者時間軸要先算:A2 用它來「切段」,A1 只用它「貼標籤」
+        timeline = await pyannote_diar.diarize(audio) if (diarize and pyannote_diar.enabled()) else None
 
-        clips = [audio[int(b * SR / 1000):int(e * SR / 1000)] for b, e in segs]
+        preset_spk = None
+        if timeline and config.DIARIZE_SEGMENT == "speaker":
+            # A2:依「語者轉換」切段 —— 每段天生單一語者,不必再事後貼標籤
+            spans = _split_long(audio, build_spans(timeline, config.A2_MERGE_GAP,
+                                                   config.A2_MIN_DUR, config.SPK_PREFIX),
+                                MAX_SEG_MS)
+            if spans:
+                segs = [[b, e] for b, e, _ in spans]
+                preset_spk = [l for _, _, l in spans]
+                print(f"[upload] {mid} 切段: 語者轉換(A2), {len(segs)} 段 / "
+                      f"{len(set(preset_spk))} 位")
+        if preset_spk is None:             # 現況 / A2 不可用時的退路:依停頓切
+            segs = _cap_segments(await models.vad_offline(audio), MAX_SEG_MS)
+            if not segs:                   # VAD 沒切到 → 整段當一段
+                segs = [[0, int(audio.size / SR * 1000)]]
+
+        def _clip(i):
+            """取段落音訊。A2 的切點正好落在語音邊界上,補一點 lead-in 給 ASR;
+            但**夾限在鄰段之外**,免得把隔壁那個人的聲音也收進來。"""
+            b, e = segs[i]
+            pad = int(config.SEG_PAD_MS) if preset_spk is not None else 0
+            if pad:
+                lo = segs[i - 1][1] if i > 0 else 0
+                hi = segs[i + 1][0] if i + 1 < len(segs) else int(audio.size / SR * 1000)
+                b, e = max(b - pad, lo, 0), min(e + pad, hi)
+            return audio[int(b * SR / 1000):int(e * SR / 1000)]
+
+        clips = [_clip(i) for i in range(len(segs))]
 
         # 定稿:併發(vLLM 會 continuous batching),用 semaphore 控上限
         sem = asyncio.Semaphore(CONCURRENCY)
+
+        fails: list = []
 
         async def fin(clip):
             if not models.is_speech_segment(clip):   # 非語音段不送定稿(會被幻覺成假句子)
@@ -84,20 +141,33 @@ async def _process(mid: str, user: str, audio: np.ndarray, diarize: bool):
             async with sem:
                 try:
                     return await models.finalize_qwen(clip)
-                except Exception:
-                    return ""                        # 逾時/失敗:略過該段,不讓整批上傳失敗
+                except Exception as e:
+                    fails.append(str(e))             # 逾時/失敗:略過該段,不讓整批上傳失敗
+                    return ""
 
         texts = await asyncio.gather(*[fin(c) for c in clips])
+        if fails:   # 別靜默:定稿服務掛掉時,原本只會看到「0 段」而查不出原因
+            print(f"[upload] {mid} 定稿失敗 {len(fails)}/{len(clips)} 段,例:{fails[0][:120]}")
 
-        # 說話者:離線「全域」分群。整份音訊都在手上,不必像即時串流那樣邊來邊判、
-        # 一次定案不可回頭 —— 先收集全部聲紋,再一次看完決定分組(見 diarize.cluster_offline)。
+        # 說話者:A2 已在切段時決定;A1 用時間軸貼標籤;都不可用才退回 campplus
+        # (每個 VAD 段一個聲紋 —— 段內混多人時必然失準)。
         speakers = [None] * len(segs)
         if diarize:
             idxs = [i for i, c in enumerate(clips) if c.size and texts[i].strip()]
-            embs = [await models.spk_embed(clips[i]) for i in idxs]   # spk_embed 內部有鎖,序列即可
-            durs = [(segs[i][1] - segs[i][0]) / 1000.0 for i in idxs]
-            labels, _, _ = assign_all(embs, durs, config.SPK_THRESHOLD,
-                                      config.SPK_PREFIX, config.SPK_MIN_NEW_SEC)
+            labels = None
+            if preset_spk is not None:
+                labels = [preset_spk[i] for i in idxs]      # A2:切段時就已經知道是誰
+            elif timeline:
+                # A1:分段仍由 VAD 決定,只把時間軸上「重疊最久」的語者貼回每一段
+                labels = labels_from_timeline(timeline, [segs[i] for i in idxs],
+                                              config.SPK_PREFIX)
+                print(f"[upload] {mid} 語者分離: pyannote/A1, {len({l for l in labels if l})} 位")
+            if labels is None:
+                embs = [await models.spk_embed(clips[i]) for i in idxs]   # spk_embed 內部有鎖
+                durs = [(segs[i][1] - segs[i][0]) / 1000.0 for i in idxs]
+                labels, _, _ = assign_all(embs, durs, config.SPK_THRESHOLD,
+                                          config.SPK_PREFIX, config.SPK_MIN_NEW_SEC)
+                print(f"[upload] {mid} 語者分離: campplus, {len({l for l in labels if l})} 位")
             for i, label in zip(idxs, labels):
                 speakers[i] = label
 

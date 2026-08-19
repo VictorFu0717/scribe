@@ -26,3 +26,8 @@ sqlite-vec==0.1.9              # SQLite 向量檢索 (⑥ RAG)
 # 認證 (⑦)
 PyJWT==2.13.0
 bcrypt==5.0.0
+
+# 語者分離 (整檔上傳路徑;選用 —— 沒裝會自動退回 campplus)
+# 模型是 HF gated:首次需 HF_TOKEN 下載,之後可離線用快取。
+# 正式機不能連外時,請預先把 ~/.cache/huggingface 打包過去並設 HF_HUB_OFFLINE=1
+pyannote.audio==4.0.7

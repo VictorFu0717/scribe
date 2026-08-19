@@ -121,6 +121,101 @@ def _relabel(raw, prefix: str) -> list[str]:
     return [f"{prefix}{order[c]}" for c in raw]
 
 
+def flatten_turns(turns, rule: str = "continue"):
+    """把可重疊的語者時間軸攤平成「每個瞬間只有一位」。
+
+    重疊時誰勝出:
+      continue 上一刻就已在說話的人(把插話/附和視為背景) —— 預設
+      longest  所屬 turn 較長者
+    實測兩者差異極小(平均 DER 20.8% vs 20.9%),不是關鍵決策。
+
+    ⚠️ 端點必須先四捨五入到同一精度再比較,否則會因浮點差異把語音判成「沒人在說」
+    而整段漏掉(這個 bug 在評估腳本上讓 DER 從 5% 暴增到 74%)。
+    """
+    turns = [(round(float(s), 3), round(float(e), 3), l) for s, e, l in (turns or [])
+             if float(e) > float(s)]
+    if not turns:
+        return []
+    pts = sorted({x for s, e, _ in turns for x in (s, e)})
+    out, prev = [], None
+    for i in range(len(pts) - 1):
+        a, b = pts[i], pts[i + 1]
+        if b - a < 1e-6:
+            continue
+        act = [t for t in turns if t[0] <= a + 1e-6 and t[1] >= b - 1e-6]
+        if not act:
+            prev = None
+            continue
+        if len(act) == 1:
+            win = act[0][2]
+        elif rule == "continue" and prev is not None and any(l == prev for _, _, l in act):
+            win = prev
+        else:
+            win = max(act, key=lambda t: t[1] - t[0])[2]
+        if out and out[-1][2] == win and abs(out[-1][1] - a) < 1e-6:
+            out[-1] = (out[-1][0], b, win)
+        else:
+            out.append((a, b, win))
+        prev = win
+    return out
+
+
+def build_spans(turns, merge_gap: float = 0.5, min_dur: float = 0.2,
+                prefix: str = "說話者", rule: str = "continue"):
+    """語者時間軸 → 可直接送 ASR 的分段 [(起ms, 訖ms, 標籤)]。
+
+    這是 A2 的核心:切段依據從「停頓」換成「換人」,每段天生只有一位語者,
+    標籤必然正確、文字也不會混雜多人(現行 VAD 切段實測 84% 的段混了平均 3 人)。
+
+    merge_gap 合併相鄰同人的間隔;min_dur 丟棄過短的碎段。
+    實測(5 場真實會議)這兩個參數對 DER 幾乎沒影響(0.6 個百分點內),
+    但對段數影響很大(75 → 52 段)→ **應該用「段數」而不是 DER 來選**:
+    段少 = ASR 呼叫少、處理快、App 顯示整齊。
+    """
+    flat = flatten_turns(turns, rule)
+    merged: list = []
+    for a, b, l in flat:
+        if merged and merged[-1][2] == l and a - merged[-1][1] <= merge_gap:
+            merged[-1] = (merged[-1][0], b, l)
+        else:
+            merged.append((a, b, l))
+    kept = [(a, b, l) for a, b, l in merged if b - a >= min_dur]
+    order: dict = {}
+    for _, _, l in kept:
+        if l not in order:
+            order[l] = len(order) + 1
+    return [(int(a * 1000), int(b * 1000), f"{prefix}{order[l]}") for a, b, l in kept]
+
+
+def labels_from_timeline(timeline, spans, prefix: str = "說話者", min_overlap: float = 0.0):
+    """把語者時間軸貼回既有的 ASR 分段:每段取「重疊最久」的語者(A1 做法)。
+
+    timeline: [(起秒, 訖秒, 任意標籤)],可重疊(pyannote 會標出同時說話)。
+    spans:    [(起ms, 訖ms)] —— ASR 的分段(仍由 VAD 決定,A1 不改切段)。
+
+    一段若跨越多位語者(實測 84% 的段會),這裡只能取主要發言者 —— 這是 A1 的已知取捨;
+    要根治得改用語者轉換點來切段(A2)。回傳與 spans 等長的標籤,編號依首次出現排序。
+    """
+    out_raw = []
+    for b_ms, e_ms in spans:
+        b, e = b_ms / 1000.0, e_ms / 1000.0
+        acc: dict = {}
+        for s, t, lab in timeline or []:
+            ov = min(e, t) - max(b, s)
+            if ov > 0:
+                acc[lab] = acc.get(lab, 0.0) + ov
+        if acc:
+            best = max(acc, key=acc.get)
+            out_raw.append(best if acc[best] >= min_overlap else None)
+        else:
+            out_raw.append(None)
+    order: dict = {}
+    for lab in out_raw:
+        if lab is not None and lab not in order:
+            order[lab] = len(order) + 1
+    return [None if lab is None else f"{prefix}{order[lab]}" for lab in out_raw]
+
+
 def assign_all(embeddings, durations=None, threshold: float = 0.5, prefix: str = "說話者",
                min_reliable_sec: float = 0.0, n_speakers: int | None = None):
     """全域分群 + 短段救援。回傳 (labels, centroids, counts)。

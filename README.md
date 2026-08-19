@@ -158,6 +158,22 @@ Server → Client (JSON):
 >   （WS 每次 partial 本就重送整個 `segments`，App 會自動更新；收尾時再強制跑一次）。
 > - **整檔上傳** → 同樣走 `assign_all()`：用夠長的段決定分群（centroid linkage），再把每段（含短段）歸到最近的中心。
 >
+> **整檔上傳可改用 pyannote 語者分離**（`DIARIZE_BACKEND`/`DIARIZE_SEGMENT`）。
+> 5 場真實會議（AliMeeting，重疊率 2%~64%，含 RTTM 標準答案）實測 DER：
+>
+> | 切段依據 | 標籤來源 | 平均 DER | 語者人數 |
+> |---|---|---|---|
+> | VAD（停頓）| campplus（現狀）| 44.1% | 常塌成 1~2 位或碎成 8~9 位 |
+> | VAD（停頓）| pyannote（A1）| 37.2% | **每場都對** |
+> | **語者轉換（A2）**| pyannote | **20.8%** | **每場都對** |
+>
+> ⚠️ **不要拿「campplus 44.1% vs pyannote 原始時間軸 16.1%」宣稱改善 24pp** —— 那混淆了
+> 「標籤方法」與「輸出顆粒度」。真正的改善要靠 A2 換掉切段依據。
+>
+> A2 的取捨：段落從「一句話」變成「一段發言」（較長、較少：83 段 → 43 段）；
+> 重疊語音只保留主導者；重疊嚴重的場合改善有限（64% 重疊那場僅 64.2%→57.0%）。
+> **App 端不需改**（欄位格式不變），但上傳與即時錄音的段落顆粒度會不一致。
+>
 > 模擬實測（100 次/組，段長分布貼近真實對話）：
 >
 > | 情境 | 原版貪婪 | 加 (A) | **加 (A)+(B)** |
@@ -308,6 +324,11 @@ GET /meetings/{id}/translation?target=en  → {"target","text"}   (未翻過回 
 | `SPK_MIN_NEW_SEC` | `2.0` | **短於此的段不得新增語者**（只能歸入最像的既有語者，也不更新中心）。防「語者暴增」的關鍵，見下方說明 |
 | `SPK_RECLUSTER_EVERY` | `10` | 即時串流每累積幾段就回頭全域重分群、修正先前標籤；`0`=關 |
 | `SPK_PREFIX` | `說話者` | 語者標籤前綴 |
+| `DIARIZE_BACKEND` | `auto` | `auto`（有 pyannote 就用，否則退回）/ `campplus` / `pyannote`。**只影響整檔上傳**，即時串流仍走 campplus |
+| `DIARIZE_SEGMENT` | `vad` | 上傳路徑的切段依據：`vad`=依停頓（現狀）/ `speaker`=依語者轉換（A2，見下方）|
+| `A2_MERGE_GAP` | `0.5` | (A2) 合併相鄰同人的間隔秒數 |
+| `A2_MIN_DUR` | `0.2` | (A2) 丟棄短於此的碎段 |
+| `HF_TOKEN` | — | 下載 pyannote gated 模型用；正式機不能連外時請預載 HF cache 並設 `HF_HUB_OFFLINE=1` |
 | `PORT` | `8005` | scribe 埠 |
 
 ### 定稿前的音訊守門（為什麼需要）

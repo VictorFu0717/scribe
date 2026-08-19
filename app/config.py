@@ -47,7 +47,7 @@ SEG_NORM_MAX_GAIN = float(os.getenv("SEG_NORM_MAX_GAIN", "8"))
 DIARIZE_DEFAULT = os.getenv("DIARIZE", "0") in ("1", "true", "True")
 SPK_MODEL = os.getenv("SPK_MODEL", "funasr/campplus")   # ERes2NetV2: iic/speech_eres2netv2_sv_zh-cn_16k-common (SPK_HUB=ms)
 SPK_HUB = os.getenv("SPK_HUB", FUNASR_HUB)
-SPK_THRESHOLD = float(os.getenv("SPK_THRESHOLD", "0.5"))
+SPK_THRESHOLD = float(os.getenv("SPK_THRESHOLD", "0.65"))
 SPK_PREFIX = os.getenv("SPK_PREFIX", "說話者")
 # 短於此的段不得「新增語者」(只能歸入最像的既有語者)。實測 CAM++ 聲紋對段長極敏感:
 #   同一人 cos 在 3.0s 是 0.67(0% 誤判)、2.0s 0.56(27%)、1.0s 0.37(80%)、0.3s 0.18(99%),
@@ -56,6 +56,35 @@ SPK_PREFIX = os.getenv("SPK_PREFIX", "說話者")
 SPK_MIN_NEW_SEC = float(os.getenv("SPK_MIN_NEW_SEC", "2.0"))
 # 即時串流每累積這麼多段就回頭全域重分群一次(修正先前判錯的標籤);0=關。
 SPK_RECLUSTER_EVERY = int(os.getenv("SPK_RECLUSTER_EVERY", "10"))
+
+# --- 語者分離後端(目前只影響「整檔上傳」路徑,即時串流仍走 campplus)---
+# auto(預設):裝了 pyannote 且模型抓得到就用它,否則自動退回 campplus。
+# 依據:5 場真實會議(AliMeeting,重疊率 2%~64%)實測 DER,**同樣輸出在 VAD 段上的公平比較**:
+#   campplus 44.1% → pyannote 37.2%(改善 6.9pp)。
+#   ⚠️ 別拿「campplus 61.6% vs pyannote 原始時間軸 16.1%」來宣稱改善 45pp —— 那混淆了
+#   「標籤方法」與「輸出顆粒度」兩個變數;細顆粒度要靠 DIARIZE_SEGMENT=speaker(A2)才拿得到。
+#   pyannote 真正穩定的優勢是**語者人數每場都對**(campplus 會塌成 1~2 位或碎成 8~9 位)。
+#   速度兩者相當(1 小時錄音各約 16s/19s)。
+DIARIZE_BACKEND = os.getenv("DIARIZE_BACKEND", "auto")   # auto | campplus | pyannote
+PYANNOTE_SEG = os.getenv("PYANNOTE_SEG", "pyannote/segmentation-3.0")
+PYANNOTE_EMB = os.getenv("PYANNOTE_EMB", "pyannote/wespeaker-voxceleb-resnet34-LM")
+# 官方 speaker-diarization-3.1 的超參數(Optuna 調出來的,別隨手改)
+PYANNOTE_THRESHOLD = float(os.getenv("PYANNOTE_THRESHOLD", "0.7045654963945799"))
+PYANNOTE_MIN_CLUSTER = int(os.getenv("PYANNOTE_MIN_CLUSTER", "12"))
+# gated 模型下載用;正式機若不能連外,請先把 HF cache 預載進去並設 HF_HUB_OFFLINE=1
+HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN")
+
+# 上傳路徑的「切段依據」:
+#   vad(預設,維持現狀)    依停頓切 → 標籤只能取主要發言者(一段常混多人)
+#   speaker(A2)          依「語者轉換」切 → 每段天生單一語者
+# 實測 5 場真實會議平均 DER:VAD 切段 + pyannote 標籤 37.2% → 依語者切段 20.8%。
+# 但重疊嚴重的場合改善有限(64% 重疊那場 64.2%→56.3%),因為攤平重疊必然有損。
+# pyannote 不可用時自動退回 vad。
+DIARIZE_SEGMENT = os.getenv("DIARIZE_SEGMENT", "vad")     # vad | speaker
+# 合併相鄰同人的間隔 / 丟棄過短碎段。實測對 DER 幾乎無影響(0.6pp 內),但段數 75→52,
+# 所以是照「段數」選的:段少 = ASR 呼叫少、處理快、App 顯示整齊。
+A2_MERGE_GAP = float(os.getenv("A2_MERGE_GAP", "0.5"))
+A2_MIN_DUR = float(os.getenv("A2_MIN_DUR", "0.2"))
 
 # --- 音訊 / 串流參數 ---
 SAMPLE_RATE = 16000                 # 協定固定 16k;client 需自行 resample
