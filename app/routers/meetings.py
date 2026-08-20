@@ -6,10 +6,10 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
 from pydantic import BaseModel
 
-from app import db
+from app import db, rag
 from app.auth import get_current_user
 
 router = APIRouter(prefix="/meetings", tags=["meetings"])
@@ -57,3 +57,40 @@ async def get_summary(mid: str, user: str = Depends(get_current_user)):
     if data is None:
         raise HTTPException(404, "summary not found")   # ④ 尚未產生 → 404(依契約)
     return data
+
+
+@router.post("/reindex")
+async def reindex_all(background_tasks: BackgroundTasks, user: str = Depends(get_current_user)):
+    """把這個使用者的所有會議重建向量索引(背景執行)。
+
+    什麼時候需要:embedding 服務曾經掛掉(那幾場只建了關鍵字索引、純向量模式搜不到)、
+    ⑥ RAG 之前就存在的舊會議、或換了 embedding 模型。index_meeting 本身冪等,重跑安全。
+    """
+    ms = await db.list_meetings(user)
+    ids = [m["id"] for m in ms]
+
+    async def _run():
+        ok = fail = 0
+        for mid in ids:
+            try:
+                await rag.index_meeting(user, mid)
+                ok += 1
+            except Exception as e:
+                fail += 1
+                print(f"[reindex] {mid} 失敗: {e}")
+        print(f"[reindex] {user}: {ok} 成功 / {fail} 失敗")
+
+    background_tasks.add_task(_run)
+    return {"meetings": len(ids), "status": "reindexing"}
+
+
+@router.post("/{mid}/reindex")
+async def reindex_one(mid: str, user: str = Depends(get_current_user)):
+    """重建單一會議的向量索引(同步,通常一兩秒)。"""
+    if await db.get_meeting(user, mid) is None:
+        raise HTTPException(404, "meeting not found")
+    try:
+        await rag.index_meeting(user, mid)
+    except Exception as e:
+        raise HTTPException(503, f"索引失敗(embedding 服務可用嗎?): {e}")
+    return {"id": mid, "status": "indexed"}

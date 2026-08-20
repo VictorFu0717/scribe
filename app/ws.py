@@ -123,15 +123,18 @@ async def ws_asr(ws: WebSocket):
                         # 定稿逾時/失敗:保留 paraformer 預覽文字當退路,底下照樣寫入 DB。
                         # (以前這個例外會連帶跳過寫入 → 整句從逐字稿消失)
                         await send({"type": "error", "detail": f"finalize: {e}"})
-                    if (diarize_on and seg.size and sdiar is None
+                    # 標籤模式:先用 campplus 給一個**暫時**標籤,讓 speaker 不會是 null
+                    # (App 不必為了「稍後才有語者」改任何東西),pyannote 約 15 秒後覆蓋掉。
+                    if (diarize_on and seg.size and not sdiar_cuts
                             and segments[idx].get("speaker") is None):
                         try:
                             emb = await models.spk_embed(seg)
                             s0 = segments[idx]
                             dur = (s0["end_ms"] - s0["start_ms"]) / 1000.0   # 真實長度(不含 padding)
                             segments[idx]["speaker"] = clusterer.assign(emb, dur)
-                            spk_hist.append((idx, emb, dur))
-                            await recluster_speakers()
+                            if sdiar is None:      # 有 pyannote 時由它負責修正,不必兩套互相蓋
+                                spk_hist.append((idx, emb, dur))
+                                await recluster_speakers()
                         except Exception as e:
                             await send({"type": "error", "detail": f"diarize: {e}"})
                     await push_partial()

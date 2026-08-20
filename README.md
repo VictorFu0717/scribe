@@ -227,6 +227,16 @@ body: {"messages":[{"role","content"}...], "meeting_id":str|null, "language":"zh
 > 帶 `meeting_id` → 以該場為「目前會議」;不帶 → 可跨會議。系統會注入「今天日期」,agent 能自行把
 > 「上週/上個月5號」換算成 `date_from/date_to` 傳給 `search_meetings`。工具註冊表好擴充(加工具 = 加 schema + handler)。
 
+### 重建向量索引 — `POST /meetings/{id}/reindex` / `POST /meetings/reindex`
+
+```
+POST /meetings/{id}/reindex   → {"id":..,"status":"indexed"}      單場,同步(約 1~2 秒)
+POST /meetings/reindex        → {"meetings":N,"status":"reindexing"} 該使用者全部,背景
+```
+> 什麼時候需要：**embedding 服務曾經掛掉**（那幾場只建了關鍵字索引，純向量模式搜不到，
+> log 會有 `[rag] ... 僅建關鍵字索引`）、⑥ RAG 之前就存在的舊會議、或換了 embedding 模型。
+> `index_meeting` 冪等，重跑安全。單場若 embedding 服務不可用會回 **503**。
+
 ### ③ 單場會議問答（舊）— `POST /meeting/chat`（SSE 串流）
 ```
 body: {"transcript":"逐字稿全文","question":"問題","history":[{"role","content"}...]}
