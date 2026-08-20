@@ -100,6 +100,13 @@ WS_SEGMENT = os.getenv("WS_SEGMENT", "vad")               # vad | speaker
 #   latency=20 recluster=10 → DER 13.2%, 中位 5.4s   (再拉長沒有更好)
 WS_DIAR_LATENCY = float(os.getenv("WS_DIAR_LATENCY", "15"))
 WS_DIAR_RECLUSTER = float(os.getenv("WS_DIAR_RECLUSTER", "5"))
+# 即時串流的「語者標籤」來源(與切段依據分開):
+#   auto(預設) 有 pyannote 就用它的時間軸貼標籤,否則 campplus
+#   campplus   每段抽一次聲紋再分群(舊行為)
+# 搭配 WS_SEGMENT=vad 時 → **字照樣約 1 秒出來**(即時翻譯不受影響),
+# 只有語者標籤晚約 15 秒才貼上、之後持續修正。5 場實測 DER:campplus 44.1% → pyannote 37.2%。
+# (想要更準的 21.3% 就得用 WS_SEGMENT=speaker,但字會慢 20 秒 —— 先知道誰在講才切得了段。)
+WS_DIARIZE = os.getenv("WS_DIARIZE", "auto")              # auto | campplus | pyannote
 
 # --- 音訊 / 串流參數 ---
 SAMPLE_RATE = 16000                 # 協定固定 16k;client 需自行 resample

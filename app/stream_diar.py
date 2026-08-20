@@ -28,8 +28,12 @@ SR = 16000
 class StreamingDiarizer:
     """單一連線的串流語者分離狀態機。"""
 
-    def __init__(self, pipe, latency_sec: float, recluster_sec: float):
+    def __init__(self, pipe, latency_sec: float, recluster_sec: float, emit: bool = True):
+        """emit=True  依語者轉換切段(自己決定切點,吐段給 ASR)
+        emit=False 只維護語者時間軸,切段仍由 VAD 決定 —— 字照樣即時出來,
+                   標籤晚幾秒才貼上。適合「一邊聽一邊看即時翻譯」的情境。"""
         self._pipe = pipe
+        self._emit = emit
         self.latency = latency_sec
         self.recluster_every = recluster_sec
 
@@ -105,8 +109,10 @@ class StreamingDiarizer:
         return self._buf[max(0, s0):max(0, s1)]
 
     def _trim(self):
-        """丟掉不會再用到的音訊:已吐出、且不在任何未算視窗需求範圍內的部分。"""
-        need_ms = min(self._emitted_ms, self._n_win * self.step * 1000)
+        """丟掉不會再用到的音訊。只維護時間軸時沒有「已吐出」的概念,只看視窗進度,
+        否則 _emitted_ms 永遠是 0 → 整場音訊都留著不放。"""
+        win_ms = self._n_win * self.step * 1000
+        need_ms = win_ms if not self._emit else min(self._emitted_ms, win_ms)
         keep_from = max(0.0, need_ms - 2000)          # 留 2 秒餘裕給 padding
         drop = int((keep_from - self._buf_start_ms) * SR / 1000)
         if drop > SR:                                  # 至少累積 1 秒才值得搬移
@@ -146,7 +152,7 @@ class StreamingDiarizer:
                     relabels[row["seq"]] = lab
 
         out = []
-        if self._spans:                                # ④ 只吐「已定案且不會再長大」的段
+        if self._spans and self._emit:                 # ④ 只吐「已定案且不會再長大」的段
             for i, (b, e, lab) in enumerate(self._spans):
                 # 一個段要等到「時間軸上已經出現下一段」才算結束 —— 否則重分群把它拉長時,
                 # 多出來的部分只能另外吐成一段,一句話就被拆成好幾段(實測段數多 50%,

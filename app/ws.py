@@ -62,8 +62,9 @@ async def ws_asr(ws: WebSocket):
                                  config.SPK_MIN_NEW_SEC)
     spk_hist: list = []                 # [(segment idx, embedding, 真實秒數)] 供定期重分群
     spk_seen = 0                        # 上次重分群時的 spk_hist 長度
-    sdiar = None                        # 語者切段模式的串流 diarizer(None = 走原本的 VAD 切段)
-    sdiar_idx: list = []                # diarizer 的 seq → segments 索引
+    sdiar = None                        # 串流 diarizer(None = 不用 pyannote)
+    sdiar_cuts = False                  # True=由它決定切點;False=只提供標籤,切段仍走 VAD
+    sdiar_idx: list = []                # (切段模式) diarizer 的 seq → segments 索引
 
     # ② 儲存關聯 / 時間軸
     meeting_id = None
@@ -122,7 +123,8 @@ async def ws_asr(ws: WebSocket):
                         # 定稿逾時/失敗:保留 paraformer 預覽文字當退路,底下照樣寫入 DB。
                         # (以前這個例外會連帶跳過寫入 → 整句從逐字稿消失)
                         await send({"type": "error", "detail": f"finalize: {e}"})
-                    if diarize_on and seg.size and segments[idx].get("speaker") is None:
+                    if (diarize_on and seg.size and sdiar is None
+                            and segments[idx].get("speaker") is None):
                         try:
                             emb = await models.spk_embed(seg)
                             s0 = segments[idx]
@@ -234,6 +236,26 @@ async def ws_asr(ws: WebSocket):
                                                 s.get("start_ms"), s.get("end_ms"))
                     except Exception as e:
                         await send({"type": "error", "detail": f"persist: {e}"})
+        if not sdiar_cuts:
+            # 標籤模式:切段仍由 VAD 決定(字即時出來),這裡只用時間軸重貼所有段的標籤
+            changed = []
+            for i, s0 in enumerate(segments):
+                lab = sdiar.label_for(s0.get("start_ms", 0), s0.get("end_ms", 0))
+                if lab and s0.get("speaker") != lab:
+                    s0["speaker"] = lab
+                    changed.append(i)
+            for i in changed:
+                s0 = segments[i]
+                if meeting_id and (s0.get("text") or "").strip():
+                    try:
+                        await db.upsert_segment(meeting_id, seg_base + i,
+                                                models.to_tw(s0["text"]), s0["speaker"],
+                                                s0.get("start_ms"), s0.get("end_ms"))
+                    except Exception as e:
+                        await send({"type": "error", "detail": f"persist: {e}"})
+            if changed:
+                await push_partial()
+            return
         for row in new:
             idx = len(segments)
             segments.append({"text": "", "speaker": row["speaker"],
@@ -274,13 +296,13 @@ async def ws_asr(ws: WebSocket):
 
         if seg_dur >= config.MAX_SEG_SEC:
             seg_ended = True
-        if seg_ended and not is_final and sdiar is None:   # 語者模式:切點由 diarizer 決定
+        if seg_ended and not is_final and not sdiar_cuts:   # 切段模式才由 diarizer 決定切點
             close_segment()
         await push_partial()
 
     def reset_all():
         nonlocal pf_cache, vad_cache, audio_buf, seg_samples, seg_dur
-        nonlocal cur_preview, clusterer, elapsed_ms, seg_start_ms, pad_tail, spk_seen, sdiar
+        nonlocal cur_preview, clusterer, elapsed_ms, seg_start_ms, pad_tail, spk_seen, sdiar, sdiar_cuts
         pf_cache = {}
         vad_cache = {}
         audio_buf = np.zeros(0, dtype=np.float32)
@@ -294,6 +316,7 @@ async def ws_asr(ws: WebSocket):
         spk_hist.clear()
         spk_seen = 0
         sdiar = None
+        sdiar_cuts = False
         sdiar_idx.clear()
         elapsed_ms = 0.0
         seg_start_ms = 0.0
@@ -343,14 +366,19 @@ async def ws_asr(ws: WebSocket):
                                 await models.get_spk_model()
                             except Exception as e:
                                 await send({"type": "error", "detail": f"diarize load: {e}"})
-                    if diarize_on and config.WS_SEGMENT == "speaker" and sdiar is None:
+                    want_pya = config.WS_SEGMENT == "speaker" or \
+                        config.WS_DIARIZE in ("auto", "pyannote")
+                    if diarize_on and want_pya and sdiar is None:
                         try:
                             pipe = await pyannote_diar._get()
                             if pipe is not None:
                                 from app.stream_diar import StreamingDiarizer
+                                sdiar_cuts = config.WS_SEGMENT == "speaker"
                                 sdiar = StreamingDiarizer(pipe, config.WS_DIAR_LATENCY,
-                                                          config.WS_DIAR_RECLUSTER)
-                                print("[ws] 語者切段模式啟用(定稿會慢約 10~15 秒)")
+                                                          config.WS_DIAR_RECLUSTER,
+                                                          emit=sdiar_cuts)
+                                print(f"[ws] pyannote 啟用:"
+                                      f"{'依語者切段(定稿慢約 20 秒)' if sdiar_cuts else '只貼標籤(字即時,標籤晚約 15 秒)'}")
                         except Exception as e:
                             await send({"type": "error", "detail": f"diarize load: {e}"})
                     if meeting_id:
@@ -366,10 +394,10 @@ async def ws_asr(ws: WebSocket):
                     if audio_buf.size > 0:
                         await process_chunk(audio_buf, is_final=True)
                         audio_buf = np.zeros(0, dtype=np.float32)
+                    if not sdiar_cuts:
+                        close_segment()
                     if sdiar is not None:
                         await drain_sdiar(final=True)
-                    else:
-                        close_segment()
                     await fin_queue.join()      # 等最後一句定稿 + 寫入 DB
                     await recluster_speakers(force=True)   # 收尾:用全部聲紋做最後一次修正
                     await finalize_meeting()    # 設 ready + 索引(逐字稿早已逐句寫好)
