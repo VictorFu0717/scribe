@@ -86,6 +86,16 @@ DIARIZE_SEGMENT = os.getenv("DIARIZE_SEGMENT", "vad")     # vad | speaker
 A2_MERGE_GAP = float(os.getenv("A2_MERGE_GAP", "0.5"))
 A2_MIN_DUR = float(os.getenv("A2_MIN_DUR", "0.2"))
 
+# 即時串流的切段依據(獨立於上傳,預設維持現狀):
+#   vad(預設)  聽到停頓就切,定稿約 1 秒後出現 —— 現行行為,完全不動
+#   speaker    依語者轉換切(層次①)。定稿慢約 10~15 秒(要等 pyannote 的 10 秒視窗滑過去
+#              才知道那一刻是誰在講),但**預覽灰字仍即時**,畫面不會空著。
+# 離線模擬實測(4 分鐘真實會議):DER 9.3%(離線 A2 是 5.5%,串流多付約 4pp),
+# 語者人數正確,延遲中位 10.2s,只吃 4% 即時預算,記憶體約 36MB/小時/連線(不留音訊)。
+WS_SEGMENT = os.getenv("WS_SEGMENT", "vad")               # vad | speaker
+WS_DIAR_LATENCY = float(os.getenv("WS_DIAR_LATENCY", "10"))     # 等多久才算「定案」
+WS_DIAR_RECLUSTER = float(os.getenv("WS_DIAR_RECLUSTER", "10")) # 每隔多久重跑全域分群
+
 # --- 音訊 / 串流參數 ---
 SAMPLE_RATE = 16000                 # 協定固定 16k;client 需自行 resample
 PF_CHUNK = [0, 10, 5]               # paraformer 串流 chunk(600ms)

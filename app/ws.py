@@ -24,6 +24,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app import config, db, models, rag
 from app.auth import decode_jwt, tailscale_whois
+from app import pyannote_diar
 from app.diarize import SpeakerClusterer
 from app.diarize import assign_all as diarize_assign_all
 
@@ -61,6 +62,8 @@ async def ws_asr(ws: WebSocket):
                                  config.SPK_MIN_NEW_SEC)
     spk_hist: list = []                 # [(segment idx, embedding, 真實秒數)] 供定期重分群
     spk_seen = 0                        # 上次重分群時的 spk_hist 長度
+    sdiar = None                        # 語者切段模式的串流 diarizer(None = 走原本的 VAD 切段)
+    sdiar_idx: list = []                # diarizer 的 seq → segments 索引
 
     # ② 儲存關聯 / 時間軸
     meeting_id = None
@@ -119,7 +122,7 @@ async def ws_asr(ws: WebSocket):
                         # 定稿逾時/失敗:保留 paraformer 預覽文字當退路,底下照樣寫入 DB。
                         # (以前這個例外會連帶跳過寫入 → 整句從逐字稿消失)
                         await send({"type": "error", "detail": f"finalize: {e}"})
-                    if diarize_on and seg.size:
+                    if diarize_on and seg.size and segments[idx].get("speaker") is None:
                         try:
                             emb = await models.spk_embed(seg)
                             s0 = segments[idx]
@@ -207,12 +210,50 @@ async def ws_asr(ws: WebSocket):
         pad_tail = seg[-pad_n:] if pad_n else pad_tail
         fin_queue.put_nowait((idx, fin_seg))
 
+    async def drain_sdiar(chunk=None, final: bool = False):
+        """語者切段模式:餵音訊 → 把「已定案」的段送去定稿 → 套用回頭修正的標籤。"""
+        nonlocal cur_preview, pf_cache
+        if sdiar is None:
+            return
+        try:
+            new, relabels = await (sdiar.flush() if final
+                                   else sdiar.push(chunk if chunk is not None
+                                                   else np.zeros(0, np.float32)))
+        except Exception as e:
+            await send({"type": "error", "detail": f"diarize: {e}"})
+            return
+        for seq, lab in relabels.items():             # 重分群後標籤變了 → 改寫 + 同步 DB
+            if seq < len(sdiar_idx):
+                i = sdiar_idx[seq]
+                segments[i]["speaker"] = lab
+                s = segments[i]
+                if meeting_id and (s.get("text") or "").strip():
+                    try:
+                        await db.upsert_segment(meeting_id, seg_base + i,
+                                                models.to_tw(s["text"]), lab,
+                                                s.get("start_ms"), s.get("end_ms"))
+                    except Exception as e:
+                        await send({"type": "error", "detail": f"persist: {e}"})
+        for row in new:
+            idx = len(segments)
+            segments.append({"text": "", "speaker": row["speaker"],
+                             "start_ms": row["start_ms"], "end_ms": row["end_ms"]})
+            sdiar_idx.append(idx)
+            fin_queue.put_nowait((idx, row["audio"]))
+        if new or relabels:
+            if new:            # 這段文字已由定稿接手,預覽從頭開始(灰字只顯示尚未定案的部分)
+                cur_preview, pf_cache = "", {}
+            await push_partial()
+
     async def process_chunk(chunk, is_final):
         nonlocal cur_preview, seg_dur, elapsed_ms
         if chunk.size:
             seg_samples.append(chunk)
             seg_dur += chunk.size / config.SAMPLE_RATE
             elapsed_ms += chunk.size / config.SAMPLE_RATE * 1000
+
+        if sdiar is not None:
+            await drain_sdiar(chunk)      # 語者切段模式:由 diarizer 決定切點,不走 VAD
 
         seg_ended = False
         try:
@@ -233,13 +274,13 @@ async def ws_asr(ws: WebSocket):
 
         if seg_dur >= config.MAX_SEG_SEC:
             seg_ended = True
-        if seg_ended and not is_final:
+        if seg_ended and not is_final and sdiar is None:   # 語者模式:切點由 diarizer 決定
             close_segment()
         await push_partial()
 
     def reset_all():
         nonlocal pf_cache, vad_cache, audio_buf, seg_samples, seg_dur
-        nonlocal cur_preview, clusterer, elapsed_ms, seg_start_ms, pad_tail, spk_seen
+        nonlocal cur_preview, clusterer, elapsed_ms, seg_start_ms, pad_tail, spk_seen, sdiar
         pf_cache = {}
         vad_cache = {}
         audio_buf = np.zeros(0, dtype=np.float32)
@@ -252,6 +293,8 @@ async def ws_asr(ws: WebSocket):
                                      config.SPK_MIN_NEW_SEC)
         spk_hist.clear()
         spk_seen = 0
+        sdiar = None
+        sdiar_idx.clear()
         elapsed_ms = 0.0
         seg_start_ms = 0.0
 
@@ -300,6 +343,16 @@ async def ws_asr(ws: WebSocket):
                                 await models.get_spk_model()
                             except Exception as e:
                                 await send({"type": "error", "detail": f"diarize load: {e}"})
+                    if diarize_on and config.WS_SEGMENT == "speaker" and sdiar is None:
+                        try:
+                            pipe = await pyannote_diar._get()
+                            if pipe is not None:
+                                from app.stream_diar import StreamingDiarizer
+                                sdiar = StreamingDiarizer(pipe, config.WS_DIAR_LATENCY,
+                                                          config.WS_DIAR_RECLUSTER)
+                                print("[ws] 語者切段模式啟用(定稿會慢約 10~15 秒)")
+                        except Exception as e:
+                            await send({"type": "error", "detail": f"diarize load: {e}"})
                     if meeting_id:
                         try:
                             await db.set_status(meeting_id, "transcribing")
@@ -313,7 +366,10 @@ async def ws_asr(ws: WebSocket):
                     if audio_buf.size > 0:
                         await process_chunk(audio_buf, is_final=True)
                         audio_buf = np.zeros(0, dtype=np.float32)
-                    close_segment()
+                    if sdiar is not None:
+                        await drain_sdiar(final=True)
+                    else:
+                        close_segment()
                     await fin_queue.join()      # 等最後一句定稿 + 寫入 DB
                     await recluster_speakers(force=True)   # 收尾:用全部聲紋做最後一次修正
                     await finalize_meeting()    # 設 ready + 索引(逐字稿早已逐句寫好)
