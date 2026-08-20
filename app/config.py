@@ -90,11 +90,16 @@ A2_MIN_DUR = float(os.getenv("A2_MIN_DUR", "0.2"))
 #   vad(預設)  聽到停頓就切,定稿約 1 秒後出現 —— 現行行為,完全不動
 #   speaker    依語者轉換切(層次①)。定稿慢約 10~15 秒(要等 pyannote 的 10 秒視窗滑過去
 #              才知道那一刻是誰在講),但**預覽灰字仍即時**,畫面不會空著。
-# 離線模擬實測(4 分鐘真實會議):DER 9.3%(離線 A2 是 5.5%,串流多付約 4pp),
-# 語者人數正確,延遲中位 10.2s,只吃 4% 即時預算,記憶體約 36MB/小時/連線(不留音訊)。
+# 只吃 4% 即時預算,記憶體約 36MB/小時/連線(不留音訊)。
 WS_SEGMENT = os.getenv("WS_SEGMENT", "vad")               # vad | speaker
-WS_DIAR_LATENCY = float(os.getenv("WS_DIAR_LATENCY", "10"))     # 等多久才算「定案」
-WS_DIAR_RECLUSTER = float(os.getenv("WS_DIAR_RECLUSTER", "10")) # 每隔多久重跑全域分群
+# latency:等多久才算「定案」可送 ASR。**別設太小** —— 剛錄到的區域只被少數視窗覆蓋,
+# 時間軸還是暫定的,會看到較多語者變化 → 段落被切碎、文字支離破碎。
+# 3 場真實會議實測(上傳 A2 基準 DER 12.8% / 中位段長 6.3s):
+#   latency=10 recluster=10 → DER 15.2%, 中位 3.7s   ← 明顯比上傳差,體感就是這個
+#   latency=15 recluster=5  → DER 13.2%, 中位 5.3s   ← 預設值,幾乎追平上傳
+#   latency=20 recluster=10 → DER 13.2%, 中位 5.4s   (再拉長沒有更好)
+WS_DIAR_LATENCY = float(os.getenv("WS_DIAR_LATENCY", "15"))
+WS_DIAR_RECLUSTER = float(os.getenv("WS_DIAR_RECLUSTER", "5"))
 
 # --- 音訊 / 串流參數 ---
 SAMPLE_RATE = 16000                 # 協定固定 16k;client 需自行 resample

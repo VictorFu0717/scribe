@@ -114,7 +114,7 @@ class StreamingDiarizer:
             self._buf_start_ms += drop * 1000 / SR
 
     # ---------------------------------------------------------------- 對外
-    async def push(self, chunk: np.ndarray):
+    async def push(self, chunk: np.ndarray, final: bool = False):
         """餵音訊。回傳 (可送 ASR 的新段, 既有段的標籤更新)。"""
         if chunk is not None and chunk.size:
             self._buf = np.concatenate([self._buf, chunk.astype(np.float32)])
@@ -146,13 +146,16 @@ class StreamingDiarizer:
                     relabels[row["seq"]] = lab
 
         out = []
-        if self._spans:                                # ④ 只吐已定案的段
-            for b, e, lab in self._spans:
-                # 每次重分群都會重新推導 spans,邊界會變。若一個段的起點落在「已吐出」
-                # 範圍內,**要截斷後吐出剩下的部分**,不能整段跳過 —— 否則重算把兩段併長時,
-                # 中間那截語音會永遠消失(實測會漏掉一半的語音、DER 50%)。
+        if self._spans:                                # ④ 只吐「已定案且不會再長大」的段
+            for i, (b, e, lab) in enumerate(self._spans):
+                # 一個段要等到「時間軸上已經出現下一段」才算結束 —— 否則重分群把它拉長時,
+                # 多出來的部分只能另外吐成一段,一句話就被拆成好幾段(實測段數多 50%,
+                # 文字支離破碎、每段 ASR 的上下文也變少)。
+                done = final or (i + 1 < len(self._spans)
+                                 and self._spans[i + 1][0] <= settle_ms)
+                # 起點若落在已吐出範圍內就截斷(重分群把前後段併長時,中間那截不能弄丟)
                 b = max(b, self._emitted_ms)
-                if e > settle_ms or (e - b) < config.A2_MIN_DUR * 1000:
+                if not done or e > settle_ms or (e - b) < config.A2_MIN_DUR * 1000:
                     continue
                 audio = self._slice(b, e)
                 if audio.size:
@@ -173,7 +176,7 @@ class StreamingDiarizer:
             self._total_ms += pad * 1000 / SR
             self.latency = 0.0
             self._last_recluster = -1e9
-            out, relabels = await self.push(np.zeros(0, np.float32))
+            out, relabels = await self.push(np.zeros(0, np.float32), final=True)
             return out, relabels
         return [], {}
 
