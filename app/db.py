@@ -73,6 +73,12 @@ async def init_db():
                 seq INTEGER, text TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_chunks_meeting ON chunks(meeting_id);
+            -- 會議標籤(使用者自訂,如「專案會議」「每週會議」):一場可多個,用來縮小 RAG 檢索範圍
+            CREATE TABLE IF NOT EXISTS meeting_tags(
+                meeting_id TEXT NOT NULL, tag TEXT NOT NULL,
+                PRIMARY KEY (meeting_id, tag)
+            );
+            CREATE INDEX IF NOT EXISTS idx_mtags_tag ON meeting_tags(tag);
             """
         )
         await db.commit()
@@ -100,12 +106,91 @@ async def init_db():
     print(f"[db] ready: {config.DB_PATH}")
 
 
-def _meeting_row(r) -> dict:
+def _meeting_row(r, tags=None) -> dict:
     return {
         "id": r["id"], "title": r["title"], "created_at": r["created_at"],
         "duration_sec": r["duration_sec"], "status": r["status"],
         "has_summary": bool(r["has_summary"]), "audio_url": None,
+        "tags": tags if tags is not None else [],
     }
+
+
+def norm_tags(tags) -> list[str]:
+    """去空白、去空字串、去重(不分大小寫)、限長。保留使用者原本的大小寫寫法。"""
+    out, seen = [], set()
+    for t in (tags or []):
+        if t is None or not isinstance(t, (str, int, float)):
+            continue                      # str(None) 會變成字串 "None",得先擋掉
+        t = str(t).strip()[:40]
+        if t and t.lower() not in seen:
+            seen.add(t.lower())
+            out.append(t)
+    return out[:20]
+
+
+async def _tags_of(db, mids: list[str]) -> dict:
+    """一次查多場會議的標籤(避免 N+1)。"""
+    if not mids:
+        return {}
+    ph = ",".join("?" * len(mids))
+    cur = await db.execute(
+        f"SELECT meeting_id, tag FROM meeting_tags WHERE meeting_id IN ({ph}) ORDER BY tag",
+        mids)
+    out: dict = {m: [] for m in mids}
+    for r in await cur.fetchall():
+        out[r[0]].append(r[1])
+    return out
+
+
+async def set_tags(user_id: str, mid: str, tags) -> list[str] | None:
+    """整組覆寫某會議的標籤(空陣列 = 清空)。會議不屬於此使用者則回 None。"""
+    if await get_meeting(user_id, mid) is None:
+        return None
+    clean = norm_tags(tags)
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        await db.execute("DELETE FROM meeting_tags WHERE meeting_id=?", (mid,))
+        for t in clean:
+            await db.execute("INSERT OR IGNORE INTO meeting_tags(meeting_id,tag) VALUES(?,?)",
+                             (mid, t))
+        await db.commit()
+    return clean
+
+
+async def list_tags(user_id: str) -> list[dict]:
+    """這個使用者用過的所有標籤 + 各自的會議數(給 App 下拉、給助理注入 prompt)。"""
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT t.tag, COUNT(*) n FROM meeting_tags t JOIN meetings m ON m.id=t.meeting_id "
+            "WHERE m.user_id=? GROUP BY t.tag ORDER BY n DESC, t.tag", (user_id,))
+        return [{"tag": r[0], "count": r[1]} for r in await cur.fetchall()]
+
+
+async def meetings_with_tags(user_id: str, tags) -> list[str]:
+    """帶有「任一個」指定標籤的會議 id(標籤比對不分大小寫)。"""
+    clean = norm_tags(tags)
+    if not clean:
+        return []
+    ph = ",".join("?" * len(clean))
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        cur = await db.execute(
+            f"SELECT DISTINCT t.meeting_id FROM meeting_tags t JOIN meetings m ON m.id=t.meeting_id "
+            f"WHERE m.user_id=? AND LOWER(t.tag) IN ({ph})",
+            [user_id] + [c.lower() for c in clean])
+        return [r[0] for r in await cur.fetchall()]
+
+
+async def update_meeting(user_id: str, mid: str, title=None, tags=None) -> dict | None:
+    """更新會議(目前支援 title / tags);None = 該欄位不動。"""
+    if await get_meeting(user_id, mid) is None:
+        return None
+    if title is not None:
+        async with aiosqlite.connect(config.DB_PATH) as db:
+            await db.execute("UPDATE meetings SET title=? WHERE id=?",
+                             (str(title).strip()[:200] or "未命名會議", mid))
+            await db.commit()
+    if tags is not None:
+        await set_tags(user_id, mid, tags)
+    return await get_meeting(user_id, mid)
 
 
 # ---- users (⑦ auth;儲存層只存,雜湊在 app/auth.py) ----
@@ -139,22 +224,29 @@ def new_user_id() -> str:
 
 
 # ---- meetings ----
-async def create_meeting(user_id: str, title: str | None) -> dict:
+async def create_meeting(user_id: str, title: str | None, tags=None) -> dict:
     mid = _new_id()
     async with aiosqlite.connect(config.DB_PATH) as db:
         await db.execute(
             "INSERT INTO meetings(id,user_id,title,created_at) VALUES(?,?,?,?)",
             (mid, user_id, title or "未命名會議", _now()))
+        for t in norm_tags(tags):
+            await db.execute("INSERT OR IGNORE INTO meeting_tags(meeting_id,tag) VALUES(?,?)",
+                             (mid, t))
         await db.commit()
     return await get_meeting(user_id, mid)
 
 
-async def list_meetings(user_id: str) -> list[dict]:
+async def list_meetings(user_id: str, tags=None) -> list[dict]:
+    """tags 有值時,只回帶有「任一個」該標籤的會議。"""
+    only = set(await meetings_with_tags(user_id, tags)) if norm_tags(tags) else None
     async with aiosqlite.connect(config.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
             "SELECT * FROM meetings WHERE user_id=? ORDER BY created_at DESC", (user_id,))
-        return [_meeting_row(r) for r in await cur.fetchall()]
+        rows = [r for r in await cur.fetchall() if only is None or r["id"] in only]
+        tmap = await _tags_of(db, [r["id"] for r in rows])
+        return [_meeting_row(r, tmap.get(r["id"], [])) for r in rows]
 
 
 async def get_meeting(user_id: str, mid: str) -> dict | None:
@@ -163,7 +255,9 @@ async def get_meeting(user_id: str, mid: str) -> dict | None:
         cur = await db.execute(
             "SELECT * FROM meetings WHERE user_id=? AND id=?", (user_id, mid))
         r = await cur.fetchone()
-        return _meeting_row(r) if r else None
+        if not r:
+            return None
+        return _meeting_row(r, (await _tags_of(db, [mid])).get(mid, []))
 
 
 async def delete_meeting(user_id: str, mid: str) -> bool:
@@ -175,6 +269,7 @@ async def delete_meeting(user_id: str, mid: str) -> bool:
         await db.execute("DELETE FROM transcript_segments WHERE meeting_id=?", (mid,))
         await db.execute("DELETE FROM summaries WHERE meeting_id=?", (mid,))
         await db.execute("DELETE FROM translations WHERE meeting_id=?", (mid,))
+        await db.execute("DELETE FROM meeting_tags WHERE meeting_id=?", (mid,))
         await db.commit()
     await delete_chunks(mid)   # 連帶刪向量索引(chunks + vec_chunks)
     return True
@@ -220,14 +315,37 @@ async def delete_chunks(meeting_id: str):
         await conn.close()
 
 
-async def vector_search(user_id: str, query_emb, k: int = 8) -> list[dict]:
-    """依 user_id 分區做 KNN,回傳 [{meeting_id,title,created_at,snippet,distance}]。"""
+async def vector_search(user_id: str, query_emb, k: int = 8,
+                        meeting_ids: list[str] | None = None) -> list[dict]:
+    """依 user_id 分區做 KNN,回傳 [{meeting_id,title,created_at,snippet,distance}]。
+
+    meeting_ids 有值時,**在向量檢索當下就限制候選**(sqlite-vec 原生支援 rowid IN)。
+    這比「先取 top-k 再過濾」正確得多:500 場會議裡只有 3 場帶某標籤時,
+    後過濾很可能整個篩空;先限制候選則保證回得滿 k 筆。
+    """
     conn = await _connect_vec()
     try:
-        cur = await conn.execute(
-            "SELECT rowid, distance FROM vec_chunks "
-            "WHERE user_id=? AND embedding MATCH ? ORDER BY distance LIMIT ?",
-            (user_id, _pack(query_emb), k))
+        if meeting_ids is not None:
+            if not meeting_ids:
+                return []
+            ph = ",".join("?" * len(meeting_ids))
+            cur = await conn.execute(
+                f"SELECT id FROM chunks WHERE user_id=? AND meeting_id IN ({ph})",
+                [user_id] + list(meeting_ids))
+            ids = [r[0] for r in await cur.fetchall()]
+            if not ids:
+                return []
+            iph = ",".join("?" * len(ids))
+            cur = await conn.execute(
+                f"SELECT rowid, distance FROM vec_chunks "
+                f"WHERE user_id=? AND embedding MATCH ? AND rowid IN ({iph}) "
+                f"ORDER BY distance LIMIT ?",
+                [user_id, _pack(query_emb)] + ids + [k])
+        else:
+            cur = await conn.execute(
+                "SELECT rowid, distance FROM vec_chunks "
+                "WHERE user_id=? AND embedding MATCH ? ORDER BY distance LIMIT ?",
+                (user_id, _pack(query_emb), k))
         hits = [(r["rowid"], r["distance"]) for r in await cur.fetchall()]
         if not hits:
             return []
@@ -327,7 +445,8 @@ def fts_terms(query: str, max_terms: int = 24) -> list[str]:
     return uniq[:max_terms]
 
 
-async def keyword_search(user_id: str, query: str, k: int = 8) -> list[dict]:
+async def keyword_search(user_id: str, query: str, k: int = 8,
+                         meeting_ids: list[str] | None = None) -> list[dict]:
     """關鍵字檢索(FTS5 trigram + bm25),多租戶以 chunks.user_id 過濾。
 
     trigram 需要 >=3 字元;查詢過短(如「長照」)拆不出詞 → 退回 LIKE 子字串比對,
@@ -339,6 +458,13 @@ async def keyword_search(user_id: str, query: str, k: int = 8) -> list[dict]:
     terms = fts_terms(q)
     async with aiosqlite.connect(config.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
+        if meeting_ids is not None and not meeting_ids:
+            return []
+        mfil = ""
+        margs: list = []
+        if meeting_ids:
+            mfil = f" AND c.meeting_id IN ({','.join('?' * len(meeting_ids))})"
+            margs = list(meeting_ids)
         if terms:
             expr = " OR ".join(f'"{t}"' for t in terms)   # 雙引號:避免 FTS5 語法字元
             cur = await db.execute(
@@ -346,14 +472,14 @@ async def keyword_search(user_id: str, query: str, k: int = 8) -> list[dict]:
                 "       bm25(fts_chunks) AS score "
                 "FROM fts_chunks f JOIN chunks c ON c.id = f.rowid "
                 "JOIN meetings m ON m.id = c.meeting_id "
-                "WHERE fts_chunks MATCH ? AND c.user_id = ? "
-                "ORDER BY score LIMIT ?", (expr, user_id, k))
+                "WHERE fts_chunks MATCH ? AND c.user_id = ?" + mfil + " "
+                "ORDER BY score LIMIT ?", [expr, user_id] + margs + [k])
         else:
             cur = await db.execute(
                 "SELECT c.meeting_id, c.text AS snippet, m.title, m.created_at, 0 AS score "
                 "FROM chunks c JOIN meetings m ON m.id = c.meeting_id "
-                "WHERE c.user_id = ? AND c.text LIKE ? "
-                "ORDER BY m.created_at DESC LIMIT ?", (user_id, f"%{q}%", k))
+                "WHERE c.user_id = ? AND c.text LIKE ?" + mfil + " "
+                "ORDER BY m.created_at DESC LIMIT ?", [user_id, f"%{q}%"] + margs + [k])
         return [{"meeting_id": r["meeting_id"], "title": r["title"],
                  "created_at": r["created_at"], "snippet": r["snippet"]}
                 for r in await cur.fetchall()]

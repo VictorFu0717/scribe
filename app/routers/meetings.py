@@ -17,21 +17,46 @@ router = APIRouter(prefix="/meetings", tags=["meetings"])
 
 class CreateMeetingReq(BaseModel):
     title: str | None = None
+    tags: list[str] | None = None       # 使用者自訂標籤(選填),如「專案會議」「每週會議」
+
+
+class UpdateMeetingReq(BaseModel):
+    """PATCH 語意:沒帶的欄位不動;tags 帶空陣列 = 清空標籤。"""
+    title: str | None = None
+    tags: list[str] | None = None
+
+
+@router.get("/tags")
+async def list_tags(user: str = Depends(get_current_user)):
+    """這個使用者用過的所有標籤 + 會議數(App 做下拉/自動完成;助理也吃這份)。"""
+    return {"tags": await db.list_tags(user)}
 
 
 @router.get("")
-async def list_meetings(user: str = Depends(get_current_user)):
-    return {"items": await db.list_meetings(user)}
+async def list_meetings(tags: str | None = None, user: str = Depends(get_current_user)):
+    """tags 可用逗號分隔多個(如 ?tags=專案會議,每週會議),回傳帶有「任一個」該標籤的會議。"""
+    want = [t for t in (tags or "").split(",") if t.strip()]
+    return {"items": await db.list_meetings(user, want)}
 
 
 @router.post("")
 async def create_meeting(req: CreateMeetingReq, user: str = Depends(get_current_user)):
-    return await db.create_meeting(user, req.title)
+    return await db.create_meeting(user, req.title, req.tags)
 
 
 @router.get("/{mid}")
 async def get_meeting(mid: str, user: str = Depends(get_current_user)):
     m = await db.get_meeting(user, mid)
+    if m is None:
+        raise HTTPException(404, "meeting not found")
+    return m
+
+
+@router.patch("/{mid}")
+async def update_meeting(mid: str, req: UpdateMeetingReq,
+                         user: str = Depends(get_current_user)):
+    """更新會議的標題 / 標籤(標籤是整組覆寫,不是新增)。"""
+    m = await db.update_meeting(user, mid, req.title, req.tags)
     if m is None:
         raise HTTPException(404, "meeting not found")
     return m

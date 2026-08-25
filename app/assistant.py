@@ -47,7 +47,10 @@ TOOLS = [
         "parameters": {"type": "object", "properties": {
             "query": {"type": "string", "description": "要找的內容(語意查詢)"},
             "date_from": {"type": "string", "description": "起始日期 YYYY-MM-DD(可選)"},
-            "date_to": {"type": "string", "description": "結束日期 YYYY-MM-DD(可選)"}},
+            "date_to": {"type": "string", "description": "結束日期 YYYY-MM-DD(可選)"},
+            "tags": {"type": "array", "items": {"type": "string"},
+                     "description": "只在帶有這些標籤的會議裡找(可選)。"
+                                    "只能用系統提示中列出的既有標籤,不要自己發明。"}},
             "required": ["query"]}}},
 ]
 
@@ -79,14 +82,16 @@ async def _run_tool(name: str, args_str: str, user: str) -> str:
     if name == "list_meetings":
         ms = await db.list_meetings(user)
         return json.dumps([{"id": m["id"], "title": m["title"],
-                            "created_at": m["created_at"], "status": m["status"]}
+                            "created_at": m["created_at"], "status": m["status"],
+                            "tags": m.get("tags", [])}
                            for m in ms], ensure_ascii=False)
     if name == "search_meetings":
         search = rag.hybrid_search if config.RAG_HYBRID else rag.semantic_search
         try:
             rows = await search(user, args.get("query", ""),
                                 date_from=args.get("date_from"),
-                                date_to=args.get("date_to"))
+                                date_to=args.get("date_to"),
+                                tags=args.get("tags"))
         except Exception:
             rows = await db.search_transcripts(user, args.get("query", ""))   # 兩側都掛才退回
         rows = [{k: v for k, v in r.items() if k != "distance"} for r in rows]
@@ -109,6 +114,16 @@ async def assistant_chat(req: AssistantReq, user: str = Depends(get_current_user
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     sys = SYSTEM + (f"\n\n今天是 {today}。若使用者用相對時間(如「上週」「上個月5號」),"
                     f"請自行換算成 date_from/date_to(YYYY-MM-DD)傳給 search_meetings。")
+    try:   # 把使用者用過的標籤注入 prompt,agent 才知道可以用哪些標籤縮小檢索範圍
+        tg = await db.list_tags(user)
+    except Exception:
+        tg = []
+    if tg:
+        sys += ("\n\n這位使用者的會議標籤(括號內是會議數):"
+                + "、".join(f"{t['tag']}({t['count']})" for t in tg[:30])
+                + "。若使用者的問題明顯對應某個標籤(如「專案會議談了什麼」),"
+                  "就把該標籤傳給 search_meetings 的 tags 參數以縮小範圍;"
+                  "不確定或問題涵蓋全部時就不要傳。")
     if req.meeting_id:
         sys += (f"\n\n使用者目前正在看會議 id=「{req.meeting_id}」;"
                 f"問「這場/本次會議」相關問題時,以此會議為準(可直接對它取逐字稿/摘要)。")

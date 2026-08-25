@@ -232,6 +232,27 @@ body: {"messages":[{"role","content"}...], "meeting_id":str|null, "language":"zh
 > 帶 `meeting_id` → 以該場為「目前會議」;不帶 → 可跨會議。系統會注入「今天日期」,agent 能自行把
 > 「上週/上個月5號」換算成 `date_from/date_to` 傳給 `search_meetings`。工具註冊表好擴充(加工具 = 加 schema + handler)。
 
+### 會議標籤（讓 RAG 檢索更精準）
+
+使用者自訂標籤（如「專案會議」「每週會議」「AI會議」），**選填、一場可多個**。
+
+```
+POST   /meetings              {"title":..,"tags":["專案會議"]}   建立時可帶(選填)
+PATCH  /meetings/{id}         {"title":..,"tags":[...]}          更新;沒帶的欄位不動
+                                                                 tags 為**整組覆寫**,[] = 清空
+GET    /meetings?tags=A,B     逗號分隔;回傳帶有「任一個」該標籤的會議
+GET    /meetings/tags         → {"tags":[{"tag":"專案會議","count":3}, ...]}
+```
+> `GET /meetings`、`GET /meetings/{id}` 的回傳都多一個 **`tags`** 陣列欄位
+> （App 不改也不會壞，多的欄位會被忽略）。標籤正規化：去空白、去重（不分大小寫但保留原寫法）、
+> 單一標籤 ≤40 字、每場 ≤20 個。刪除會議會連帶清掉標籤。
+>
+> **助理怎麼用**：使用者的標籤清單會注入 system prompt，agent 判斷問題對應某標籤時
+> （如「專案會議談了什麼」）就把它傳給 `search_meetings` 的 `tags` 參數縮小範圍。
+>
+> ⚠️ 標籤過濾是**在向量檢索當下就限制候選**（sqlite-vec 原生支援 `rowid IN`），
+> 不是「先取 top-k 再過濾」—— 後者在「500 場裡只有 3 場帶該標籤」時很可能整個篩空。
+
 ### 重建向量索引 — `POST /meetings/{id}/reindex` / `POST /meetings/reindex`
 
 ```

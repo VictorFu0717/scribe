@@ -63,19 +63,32 @@ def _in_range(h, date_from, date_to) -> bool:
     return lo <= (h.get("created_at") or "") <= hi
 
 
+async def _tag_scope(user_id: str, tags):
+    """標籤 → 候選會議 id;沒指定標籤回 None(不限制)。"""
+    if not db.norm_tags(tags):
+        return None
+    return await db.meetings_with_tags(user_id, tags)
+
+
 async def semantic_search(user_id: str, query: str, k: int = 6,
-                          date_from: str | None = None, date_to: str | None = None) -> list[dict]:
-    """純語意檢索;date_from/date_to 為 YYYY-MM-DD(含)日期範圍過濾(依會議 created_at)。"""
+                          date_from: str | None = None, date_to: str | None = None,
+                          tags=None) -> list[dict]:
+    """純語意檢索。date_from/date_to 為 YYYY-MM-DD(含)日期範圍(依會議 created_at);
+    tags 有值時只在帶有「任一個」該標籤的會議裡找(在向量檢索當下就限制候選,不是後過濾)。"""
     if not (query or "").strip():
+        return []
+    scope = await _tag_scope(user_id, tags)
+    if scope is not None and not scope:
         return []
     qemb = (await _embed.embed([query]))[0]
     over = k * 4 if (date_from or date_to) else k
-    hits = await db.vector_search(user_id, qemb, over)
+    hits = await db.vector_search(user_id, qemb, over, meeting_ids=scope)
     return [h for h in hits if _in_range(h, date_from, date_to)][:k]
 
 
 async def hybrid_search(user_id: str, query: str, k: int = 6,
-                        date_from: str | None = None, date_to: str | None = None) -> list[dict]:
+                        date_from: str | None = None, date_to: str | None = None,
+                        tags=None) -> list[dict]:
     """向量 + 關鍵字 混合檢索,以 RRF(Reciprocal Rank Fusion)合併。
 
     兩者互補:向量擅長「意思相近但用詞不同」(問『營收表現』命中『這季賺了多少』),
@@ -89,18 +102,21 @@ async def hybrid_search(user_id: str, query: str, k: int = 6,
     q = (query or "").strip()
     if not q:
         return []
+    scope = await _tag_scope(user_id, tags)
+    if scope is not None and not scope:
+        return []
     over = k * 4 if (date_from or date_to) else k * 2
 
     async def _vec():
         try:
             qemb = (await _embed.embed([q]))[0]
-            return await db.vector_search(user_id, qemb, over)
+            return await db.vector_search(user_id, qemb, over, meeting_ids=scope)
         except Exception:
             return []
 
     async def _kw():
         try:
-            return await db.keyword_search(user_id, q, over)
+            return await db.keyword_search(user_id, q, over, meeting_ids=scope)
         except Exception:
             return []
 
