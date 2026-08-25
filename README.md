@@ -474,6 +474,8 @@ GET /meetings/{id}/translation?target=en  → {"target","text"}   (未翻過回 
 - [x] 定稿前音訊守門（擋非語音幻覺與長靜音卡死；逾時退回預覽文字）
 - [x] **pyannote 語者分離**（上傳 `DIARIZE_SEGMENT=speaker` / 即時 `WS_DIARIZE`、`WS_SEGMENT`）
 - [x] 重建索引（`POST /meetings/{id}/reindex`、`POST /meetings/reindex`）
+- [x] **會議標籤**（使用者自訂、選填、可多個；助理據此縮小 RAG 檢索範圍）
+- [x] 更新會議（`PATCH /meetings/{id}`：標題 / 標籤）
 - [ ] 帳號審核制 + admin 管理（產品化時;register→待審→核准）
 - [ ] diarization 指定人數（`speaker_count`；pyannote 原生支援 `num_speakers`，待接 API）
 - [ ] 摘要進向量庫（目前只索引逐字稿，問「哪場做了X決議」命中不到結構化摘要）
