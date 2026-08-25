@@ -12,18 +12,18 @@
 ## 架構
 
 ```
-[瀏覽器/App 麥克風]
-   │ WebSocket, PCM16 LE mono 16k
-   ▼
-┌─────────────────────── scribe server (FastAPI, :8005) ───────────────────────┐
-│  ① 即時 ASR                                     ③ 單場會議 QA                  │
-│  逐字預覽 + VAD 斷句 + 定稿                       POST /meeting/chat (SSE)      │
-│     │ 預覽/斷句(本地)      │ 定稿(HTTP,併發)         │ grounding 在逐字稿         │
-│     ▼                     ▼                        ▼                           │
-│  FunASR                Qwen3-ASR @ vLLM         Qwen3.6-27B @ vLLM             │
-│  paraformer-streaming  (docker, :9000)          (docker, :8004)               │
-│  + fsmn-vad            OpenAI 相容               OpenAI 相容                    │
-└──────────────────────────────────────────────────────────────────────────────┘
+[App / 瀏覽器]
+   │ WS(PCM16 16k) ── 即時錄音          │ HTTP ── 整檔上傳 / 會議 / 摘要 / 助理
+   ▼                                    ▼
+┌──────────────────── scribe server (FastAPI, :8005) ────────────────────┐
+│ ① 即時 ASR          │ 上傳轉錄        │ ④摘要 ⑤助理 ⑥RAG ⑦auth 翻譯      │
+│ 預覽+斷句+定稿       │ VAD/語者切段    │ SSE 串流、SQLite+sqlite-vec        │
+│   │        │        │   │            │   │            │                 │
+│   ▼        ▼        │   ▼            │   ▼            ▼                 │
+│ FunASR  Qwen3-ASR   │ pyannote       │ 對話 LLM     bge-m3              │
+│ paraformer  @vLLM   │ (語者分離)      │ Qwen3.6      (embedding)         │
+│ + fsmn-vad  :9000   │ 選用           │ :8004/:11434  :11434             │
+└────────────────────────────────────────────────────────────────────────┘
   簡→繁:OpenCC s2twp(逐字稿與定稿一律繁體台灣用語)
 ```
 
@@ -57,12 +57,22 @@
 main.py                    精簡入口(組裝 app、lifespan、掛路由)
 app/
 ├── config.py              所有設定(env)
-├── models.py              本地 ASR/語者 模型 + OpenCC + 定稿呼叫
-├── db.py                  SQLite 儲存(aiosqlite;meetings/transcripts/summaries)
-├── ws.py                  /ws/asr 即時轉錄 + 說話者 + 定稿寫入
-├── routers/meetings.py    會議 CRUD
+├── models.py              本地 ASR/語者模型 + OpenCC + 定稿呼叫 + 音訊守門
+├── db.py                  SQLite(meetings/transcripts/summaries/chunks/vec/fts/users)
+├── ws.py                  /ws/asr 即時轉錄 + 說話者 + 逐句寫入
+├── upload.py              整檔上傳轉錄(背景批次)
+├── diarize.py             語者分群(線上/離線)+ A2 切段規則
+├── pyannote_diar.py       pyannote 語者分離(選用,失敗自動退回 campplus)
+├── stream_diar.py         串流語者分離(邊錄邊算)
+├── llm.py                 對話 LLM 存取層(vLLM / Ollama 雙後端)
+├── embed.py               ⑥ embedding client(含 NaN 防護)
+├── rag.py                 ⑥ 切塊/索引/檢索(向量 + 可選 hybrid)
+├── summarize.py           ④ 會議摘要(SSE)
+├── assistant.py           ⑤ agentic 助理(SSE + 工具)
+├── translate.py           留檔翻譯(SSE)
 ├── chat_qa.py             /meeting/chat 單場問答(舊端點)
-└── diarize.py             說話者線上分群
+├── auth.py                ⑦ JWT / Tailscale 身分
+└── routers/meetings.py    會議 CRUD + reindex
 ```
 
 ---
@@ -136,8 +146,10 @@ Server → Client (JSON):
 ```
 > **說話者辨識**：可開關、用到才載入（不開＝零 VRAM）。開啟後每句定稿會標上「說話者N」，
 > `segments` 提供結構化結果，`committed`/`final.text` 會加「說話者N：」前綴並逐句換行。
-> 準度取決於**斷句細緻度**：一段若含多位說話者，只會判給一人。用 `VAD_MAX_END_SILENCE_MS`（越小切越細）
-> 調整；但「兩人零停頓連續交談」VAD 切不開，需真正的語者分離（未來可加 pyannote 離線精修）。
+>
+> 有兩套後端：**CAM++**（每段抽一次聲紋再分群，受限於斷句細緻度 —— 一段混多人就必然失準）
+> 與 **pyannote**（幀層級判定，可處理重疊語音）。預設 `auto`：裝了 pyannote 就用它。
+> 兩者的實測比較與取捨見下方。
 >
 > **⚠️ 段落太短時聲紋根本不可用**（實測 CAM++，這是「語者變很多」的根因）：
 >
@@ -170,14 +182,7 @@ Server → Client (JSON):
 > ⚠️ **不要拿「campplus 44.1% vs pyannote 原始時間軸 16.1%」宣稱改善 24pp** —— 那混淆了
 > 「標籤方法」與「輸出顆粒度」。真正的改善要靠 A2 換掉切段依據。
 >
-> **即時串流也可以依語者切段**（`WS_SEGMENT=speaker`）。同一段 3 分鐘真實會議實測：
->
-> | 模式 | 段數 | 辨識語者 | DER |
-> |---|---|---|---|
-> | `vad`（現狀）| 39 | 5 位（真人 3）| 14.4% |
-> | `speaker` | 27 | **3 位** | **4.1%** |
->
-> **三種組合的取捨**（實測）：
+> **即時串流的三種組合**（5 場真實會議實測）：
 >
 > | 組合 | 字的延遲 | 語者 DER | 語者人數 |
 > |---|---|---|---|
@@ -370,6 +375,11 @@ GET /meetings/{id}/translation?target=en  → {"target","text"}   (未翻過回 
 | `A2_MERGE_GAP` | `0.5` | (A2) 合併相鄰同人的間隔秒數 |
 | `A2_MIN_DUR` | `0.2` | (A2) 丟棄短於此的碎段 |
 | `HF_TOKEN` | — | 下載 pyannote gated 模型用；正式機不能連外時請預載 HF cache 並設 `HF_HUB_OFFLINE=1` |
+| `PYANNOTE_SEG` / `PYANNOTE_EMB` | `segmentation-3.0` / `wespeaker-voxceleb-resnet34-LM` | pyannote 的兩個模型 |
+| `PYANNOTE_THRESHOLD` / `PYANNOTE_MIN_CLUSTER` | `0.7045…` / `12` | 官方 3.1 超參數（Optuna 調出來的，**別隨手改**）|
+| `ASR_LANG` | — | 強制辨識語言（留空＝自動偵測）|
+| `DIARIZE` | `0` | 語者辨識的預設值（通常由 App 的 config 訊息覆寫）|
+| `DEVICE` | `cuda` | 本地模型裝置 |
 | `WS_DIARIZE` | `auto` | 即時串流的**語者標籤**來源（與切段分開）：`auto`（有 pyannote 就用）/ `campplus`。搭配 `WS_SEGMENT=vad` 時**字照樣約 1 秒出來**，只有標籤晚約 15 秒 |
 | `WS_SEGMENT` | `vad` | **即時串流**的切段依據：`vad`=聽到停頓就切（現狀，定稿約 1 秒）/ `speaker`=依語者轉換切（定稿慢約 10~15 秒，但預覽灰字仍即時）|
 | `WS_DIAR_LATENCY` | `15` | (speaker) 等多久才算「定案」可送 ASR。**別設太小**：剛錄到的區域時間軸還是暫定的，會把段落切碎 |
@@ -435,7 +445,21 @@ GET /meetings/{id}/translation?target=en  → {"target","text"}   (未翻過回 
 - [x] **④ 摘要**（`POST /meetings/{id}/summarize`，SSE + 結構化 JSON，長逐字稿 map-reduce）
 - [x] **⑤ agentic 助理**（`POST /assistant/chat`，手寫 loop + 工具:get_transcript/get_summary/list/search）
 - [x] **⑥ RAG**（sqlite-vec + bge-m3 語意檢索;定稿/上傳後自動索引;多租戶 user_id 分區 + 日期過濾）
-- [x] **hybrid 檢索**（向量 + FTS5 關鍵字，RRF 合併）—— 見下方說明
+- [x] **hybrid 檢索**（向量 + FTS5 關鍵字，RRF 合併；預設關閉，見下方）
+- [x] 整段錄音上傳轉錄（`POST /meetings/{id}/audio`，背景批次）
+- [x] **⑦ 身分辨識**（`AUTH_MODE`:jwt=帳密登入(預設;WiFi+Tailscale 混用一致身分) / tailscale=whois(純 tailnet 選用)）
+- [x] 留檔翻譯（`POST /meetings/{id}/translate`，SSE；即時雙語走 App 端裝置內翻譯）
+- [x] 對話 LLM 多後端（vLLM / Ollama，`CHAT_BACKEND`；thinking 預設關）
+- [x] 定稿前音訊守門（擋非語音幻覺與長靜音卡死；逾時退回預覽文字）
+- [x] **pyannote 語者分離**（上傳 `DIARIZE_SEGMENT=speaker` / 即時 `WS_DIARIZE`、`WS_SEGMENT`）
+- [x] 重建索引（`POST /meetings/{id}/reindex`、`POST /meetings/reindex`）
+- [ ] 帳號審核制 + admin 管理（產品化時;register→待審→核准）
+- [ ] diarization 指定人數（`speaker_count`；pyannote 原生支援 `num_speakers`，待接 API）
+- [ ] 摘要進向量庫（目前只索引逐字稿，問「哪場做了X決議」命中不到結構化摘要）
+- [ ] **CER 測試集**（3~5 段真實會議 + 人工黃金逐字稿）—— 所有「辨識準確度」改進的前提
+- [ ] 重疊語音分離（`pyannote SpeechSeparation`；搶話型會議是目前最大的殘留誤差）
+
+---
 
 ### hybrid 檢索（向量 + 關鍵字）— **預設關閉，`RAG_HYBRID=1` 開啟**
 
@@ -458,7 +482,3 @@ hybrid 目前**已證實**的價值是**韌性**：
 - **某些內容根本 embedding 不了**：實測 bge-m3(Ollama) 會對特定文字組合回 `NaN` 而讓整個請求 500，
   可 100% 重現、且**同批其他文字會被一起拖下水**。這類塊仍會寫入 `chunks`+`fts_chunks`（只是不進向量表），
   **靠關鍵字側仍搜得到**（已驗證：向量側完全找不到，hybrid 救回）。
-- [x] 整段錄音上傳轉錄（`POST /meetings/{id}/audio`，背景批次）
-- [x] **⑦ 身分辨識**（`AUTH_MODE`:jwt=帳密登入(預設;WiFi+Tailscale 混用一致身分) / tailscale=whois(純 tailnet 選用)）
-- [ ] 帳號審核制 + admin 管理（產品化時;register→待審→核准）
-- [ ] diarization 指定人數（`speaker_count`;上傳路徑 K 群聚類,選配）
