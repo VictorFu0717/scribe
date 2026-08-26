@@ -77,16 +77,33 @@ app/
 
 ---
 
-## 部署與連線（Tailscale + JWT）
+## 部署與連線（兩條路徑任選 + JWT）
 
-- **連線一律走 Tailscale**：app／使用者連 server 的 tailnet IP `http://100.68.0.81:8005`
-  （WS 用 `ws://100.68.0.81:8005/ws/asr`）。公司內、外出都一樣，不受網段影響。
-- **為什麼不走公司 WiFi 直連**：WiFi 客戶端（如 `192.168.68.x`）與 server 有線網段（`192.168.0.0/23`）**不同網段**，
-  直連需請 MIS 開通跨網段路由；Tailscale 走 WireGuard 隧道、與網段無關、零網管成本，故直接全走 Tailscale。
-- **身分辨識走 JWT**（`AUTH_MODE=jwt`）：登入拿 token，與連線層無關 → 換網路也是同一身分（多租戶 `user_id` 一致）。
-- **對外只開 `8005`**（`ufw allow in on tailscale0`；LAN 直連才需 `ufw allow from 192.168.0.0/23 to any port 8005`）。
-  `9000`(Qwen3-ASR)、`11434`(Ollama) 為內部服務，防火牆擋著即可（Ollama 若要給內網同仁，只對 LAN 網段開）。
-- **人數**：Tailscale 免費上限 6 users；~15 人需付費方案，或自架 **Headscale**（開源、無使用者上限）。
+App／使用者有**兩種方式**連到 server，兩條都可用、可並存：
+
+| 方式 | 連線位址 | 適用 | 備註 |
+|------|---------|------|------|
+| **OpenVPN**（公司既有）| `http://192.168.0.94:8005` | 公司同仁（VPN 把設備接進內網）| 沿用現有 VPN 帳號，**無額外人數限制與費用** |
+| **Tailscale** | `http://100.68.0.81:8005` | 未納管設備、外部協作 | 免費上限 **6 users**；更多需付費或自架 Headscale |
+
+WS 端點分別是 `ws://192.168.0.94:8005/ws/asr` 與 `ws://100.68.0.81:8005/ws/asr`。
+
+- **為什麼不用公司 WiFi 直連**：WiFi 客戶端（如 `192.168.68.x`）與 server 有線網段（`192.168.0.0/23`）
+  **不同網段**，直連要請 MIS 開跨網段路由。OpenVPN 與 Tailscale 都是把設備「接進」可達的網路，
+  繞過這個問題，零網管成本。
+- **身分一律走 JWT**（`AUTH_MODE=jwt`）：登入拿 token，**與連線層無關** → 同一人今天走 OpenVPN、
+  明天走 Tailscale，都是同一個 `user_id`（多租戶資料不會分裂）。
+  ⚠️ 這也是**不能用 `AUTH_MODE=tailscale` 的原因** —— `tailscale whois` 認不出 OpenVPN 進來的來源 IP，
+  那些人會全部退回 `DEFAULT_USER`、共用同一份資料。兩條路徑並存時只能用 JWT。
+- **防火牆**：對外只開 `8005`，且只開給這兩條路徑的來源
+  ```bash
+  sudo ufw allow in on tailscale0 to any port 8005            # Tailscale
+  sudo ufw allow from 192.168.0.0/23 to any port 8005         # 內網(含 OpenVPN 進來的流量)
+  ```
+  OpenVPN 客戶端若**不是** NAT 成內網位址、而是拿 VPN 位址池的 IP（如 `10.8.0.x`），
+  要改成放行那個網段：`sudo ufw allow from 10.8.0.0/24 to any port 8005`。
+  用 `sudo tail -f /var/log/ufw.log` 或看 uvicorn log 的來源 IP 就能確認實際是哪一種。
+- `9000`(Qwen3-ASR)、`11434`(Ollama) 是內部服務，**不對外開**（Ollama 若要給內網同仁用，只對 LAN 網段開）。
 
 ---
 
@@ -312,11 +329,12 @@ body: {"language":"zh-Hant"}   (可省略)
 
 由 `AUTH_MODE` 決定；**切換只改這一個設定**，RAG / 會議 / 摘要等其他程式完全不用動（都只吃 `get_current_user` 給的 `user_id`）。
 
-> **為什麼預設 `jwt`**：使用者會**同時**走公司 WiFi（同網段直連 `192.168.x.x`）和 Tailscale（外出 `100.x`）。
-> LAN 不提供「使用者是誰」，只有**應用層登入**才能在兩條路徑上得到一致身分。帳密登入一次（app 存 token）→
-> 走哪條網路都認得同一人。此時 Tailscale 只是**純遠端連線通道（VPN）**，不再是身分來源。
+> **為什麼預設 `jwt`**：連線有**兩條路徑**（OpenVPN 進內網 `192.168.0.94`、Tailscale `100.x`），
+> 而網路層只有 Tailscale 認得出人 —— OpenVPN／LAN 不提供「使用者是誰」。只有**應用層登入**
+> 才能讓同一人在兩條路徑上拿到一致身分。帳密登入一次（app 存 token）→ 走哪條網路都認得同一人。
+> 此時 VPN（兩者皆是）只負責**連線通道**，不再是身分來源。
 
-**`AUTH_MODE=jwt`（預設；WiFi + Tailscale 混用、或對公網）— 帳密登入 → JWT**
+**`AUTH_MODE=jwt`（預設；OpenVPN + Tailscale 並存、或對公網）— 帳密登入 → JWT**
 ```
 POST /auth/register  {"username","password"}       → {access_token,token_type,expires_in,user_id,username}
 POST /auth/token     form: username=&password=     → 同上(OAuth2 標準)
@@ -324,11 +342,12 @@ GET  /auth/me        Authorization: Bearer <jwt>   → 目前使用者
 ```
 - 端點以 `Authorization: Bearer <jwt>` 認身分；WS 可用 `?token=`／`Authorization` header／`config` 訊息帶 `token`。
 - `AUTH_REQUIRED=1` 強制 token（否則 401）；`=0`（開發）沒帶退回 `X-User-Id`／`DEFAULT_USER`，且 `/auth/token` 未知帳號自動註冊。
-- 帳號管理：目前**開放註冊**（網路已被 WiFi/Tailscale 閘控）；審核制／邀請制待補（register→待審→admin 核准）。
+- 帳號管理：目前**開放註冊**（網路層已被 OpenVPN／Tailscale 閘控，外人連不到）；審核制／邀請制待補（register→待審→admin 核准）。
 
-**`AUTH_MODE=tailscale`（選用；純內部、且只走 tailnet 時）— 身分取自 `tailscale whois`**
+**`AUTH_MODE=tailscale`（選用；**只有**全員走 tailnet 時才適用）— 身分取自 `tailscale whois`**
 - 免 app 登入，tailnet 邀請名單即白名單；同一人多裝置＝同一 email＝同一租戶。
-- ⚠️ **不適用「同時有公司 WiFi 直連」**：LAN 連線 whois 認不出人（會全退回 `DEFAULT_USER`）→ 這種混用要用 `jwt`。
+- ⚠️ **目前不適用**：OpenVPN／LAN 進來的連線 whois 認不出人，會全部退回 `DEFAULT_USER`
+  **共用同一份資料**（多租戶隔離失效）。兩條路徑並存就只能用 `jwt`。
 
 ### 留檔翻譯 — `POST /meetings/{id}/translate`（SSE 串流）
 ```
@@ -366,7 +385,7 @@ GET /meetings/{id}/translation?target=en  → {"target","text"}   (未翻過回 
 | `RAG_HYBRID` | `0` | `0`=**純向量（預設）**；`1`=向量＋關鍵字 RRF 混合。實測混合未帶來品質提升，見下方 |
 | `RAG_RRF_K` | `60` | RRF 常數：`score = Σ 1/(K + 名次)`。越大越像投票、越小越偏袒各自第一名 |
 | `TRANSLATE_MAP_CHARS` | `3000` | 留檔翻譯:超過此長度就分段翻 |
-| `AUTH_MODE` | `jwt` | 身分來源:`jwt`(帳密登入,預設;WiFi+Tailscale 混用一致身分) 或 `tailscale`(whois,純 tailnet 才適用) |
+| `AUTH_MODE` | `jwt` | 身分來源:`jwt`(帳密登入,預設;OpenVPN+Tailscale 並存時的唯一選擇) 或 `tailscale`(whois,全員走 tailnet 才適用) |
 | `AUTH_SECRET` | `dev-insecure...` | JWT 簽章密鑰（`jwt` 模式;**正式務必覆寫**,>=32 bytes）|
 | `AUTH_TTL` | `43200` | token 有效秒數（12h）|
 | `AUTH_REQUIRED` | `0` | (`jwt` 模式) `1`=強制 Bearer;`0`=沒帶退回 `X-User-Id`/`DEFAULT_USER` |
@@ -468,7 +487,7 @@ GET /meetings/{id}/translation?target=en  → {"target","text"}   (未翻過回 
 - [x] **⑥ RAG**（sqlite-vec + bge-m3 語意檢索;定稿/上傳後自動索引;多租戶 user_id 分區 + 日期過濾）
 - [x] **hybrid 檢索**（向量 + FTS5 關鍵字，RRF 合併；預設關閉，見下方）
 - [x] 整段錄音上傳轉錄（`POST /meetings/{id}/audio`，背景批次）
-- [x] **⑦ 身分辨識**（`AUTH_MODE`:jwt=帳密登入(預設;WiFi+Tailscale 混用一致身分) / tailscale=whois(純 tailnet 選用)）
+- [x] **⑦ 身分辨識**（`AUTH_MODE`:jwt=帳密登入(預設;OpenVPN+Tailscale 並存時的唯一選擇) / tailscale=whois(全員走 tailnet 才適用)）
 - [x] 留檔翻譯（`POST /meetings/{id}/translate`，SSE；即時雙語走 App 端裝置內翻譯）
 - [x] 對話 LLM 多後端（vLLM / Ollama，`CHAT_BACKEND`；thinking 預設關）
 - [x] 定稿前音訊守門（擋非語音幻覺與長靜音卡死；逾時退回預覽文字）
