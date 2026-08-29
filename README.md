@@ -11,25 +11,15 @@
 
 ## 架構
 
-```
-[App / 瀏覽器]
-   │ WS(PCM16 16k) ── 即時錄音          │ HTTP ── 整檔上傳 / 會議 / 摘要 / 助理
-   ▼                                    ▼
-┌──────────────────── scribe server (FastAPI, :8005) ────────────────────┐
-│ ① 即時 ASR          │ 上傳轉錄        │ ④摘要 ⑤助理 ⑥RAG ⑦auth 翻譯      │
-│ 預覽+斷句+定稿       │ VAD/語者切段    │ SSE 串流、SQLite+sqlite-vec        │
-│   │        │        │   │            │   │            │                 │
-│   ▼        ▼        │   ▼            │   ▼            ▼                 │
-│ FunASR  Qwen3-ASR   │ pyannote       │ 對話 LLM     bge-m3              │
-│ paraformer  @vLLM   │ (語者分離)      │ Qwen3.6      (embedding)         │
-│ + fsmn-vad  :9000   │ 選用           │ :8004/:11434  :11434             │
-└────────────────────────────────────────────────────────────────────────┘
-  簡→繁:OpenCC s2twp(逐字稿與定稿一律繁體台灣用語)
-```
+![scribe 整體架構：用戶端經 OpenVPN 或 Tailscale 連到 FastAPI 伺服器，伺服器再呼叫 Qwen3-ASR、qwen3.6、bge-m3 三個推論服務，並寫入 SQLite](docs/scribe-01-architecture.jpg)
+
+四層：用戶端 → 連線通道 → 應用伺服器 → 推論服務與儲存。對外只有 `:8005` 一個入口，
+定稿與對話模型都在同一台機器的其他埠上、不對外開放。
 
 **為什麼這樣切**：Qwen3-ASR 的「串流」API 不支援 batch、無法併發；因此
 - **即時預覽**用輕量的 FunASR paraformer-streaming（本地、低延遲）；
-- **定稿**丟給 `vllm serve` 的 Qwen3-ASR，vLLM 做 continuous batching → **真併發**；
+- **定稿**丟給 `vllm serve` 的 Qwen3-ASR，vLLM 做 continuous batching → **真併發**。
+
 ### 併發模型（為什麼 `workers=1` 仍能同時服務多人）
 
 `workers=1` 指的是「**單一 process、模型只載一份**」，**不是**一次只能處理一個請求：
@@ -72,7 +62,8 @@ app/
 ├── translate.py           留檔翻譯(SSE)
 ├── chat_qa.py             /meeting/chat 單場問答(舊端點)
 ├── auth.py                ⑦ JWT / Tailscale 身分
-└── routers/meetings.py    會議 CRUD + reindex
+└── routers/meetings.py    會議 CRUD + 標籤 + reindex
+docs/                      架構圖(README 內嵌)
 ```
 
 ---
@@ -187,6 +178,8 @@ Server → Client (JSON):
 >   （WS 每次 partial 本就重送整個 `segments`，App 會自動更新；收尾時再強制跑一次）。
 > - **整檔上傳** → 同樣走 `assign_all()`：用夠長的段決定分群（centroid linkage），再把每段（含短段）歸到最近的中心。
 >
+> ![即時串流與整檔上傳兩條管線的並排比較，關鍵差異在切段依據：即時依停頓斷句，上傳依語者轉換切段](docs/scribe-02-pipelines.jpg)
+>
 > **整檔上傳可改用 pyannote 語者分離**（`DIARIZE_BACKEND`/`DIARIZE_SEGMENT`）。
 > 5 場真實會議（AliMeeting，重疊率 2%~64%，含 RTTM 標準答案）實測 DER：
 >
@@ -248,6 +241,12 @@ body: {"messages":[{"role","content"}...], "meeting_id":str|null, "language":"zh
 > `get_meeting_transcript` / `get_meeting_summary` / `list_meetings` / `search_meetings`(**語意檢索**,可帶日期範圍)。
 > 帶 `meeting_id` → 以該場為「目前會議」;不帶 → 可跨會議。系統會注入「今天日期」,agent 能自行把
 > 「上週/上個月5號」換算成 `date_from/date_to` 傳給 `search_meetings`。工具註冊表好擴充(加工具 = 加 schema + handler)。
+
+### 問答檢索流程
+
+![問答流程：問題進入助理迴圈，助理選擇工具查詢；跨會議搜尋會先用標籤與日期限縮候選再做向量檢索](docs/scribe-03-rag.jpg)
+
+助理自行決定要查哪場會議、要不要跨會議搜尋。標籤與日期在**向量檢索之前**就限縮候選。
 
 ### 會議標籤（讓 RAG 檢索更精準）
 
