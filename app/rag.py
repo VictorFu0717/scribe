@@ -29,12 +29,57 @@ def _chunk_segments(segs: list[dict], max_chars: int) -> list[str]:
     return chunks
 
 
+def _summary_chunks(sm: dict) -> list[str]:
+    """把結構化摘要攤成幾段可檢索的文字。
+
+    為什麼要索引摘要:問「哪場會議做了什麼決議」時,決議句在摘要裡是一句話,
+    在逐字稿裡卻散落在一堆口語中(「那就這樣吧」「好啊那我們就…」),
+    語意檢索很難命中。摘要是人已經整理過的濃縮版,命中率高得多。
+
+    每段前面加中文標題,讓 embedding 帶上「這是決議/待辦」的語意。
+    """
+    out = []
+    ov = (sm.get("overview") or "").strip()
+    if ov:
+        out.append(f"會議摘要：{ov}")
+    for key, label in (("key_points", "重點"), ("decisions", "決議"), ("follow_ups", "後續追蹤")):
+        items = [str(x).strip() for x in (sm.get(key) or []) if str(x).strip()]
+        if items:
+            out.append(f"{label}：\n" + "\n".join(f"・{x}" for x in items))
+    todos = []
+    for a in (sm.get("action_items") or []):
+        if isinstance(a, dict):
+            t = str(a.get("task", "")).strip()
+            if not t:
+                continue
+            who = str(a.get("owner") or "").strip()
+            due = str(a.get("due") or "").strip()
+            todos.append("・" + t + (f"（負責：{who}）" if who else "") + (f"（期限：{due}）" if due else ""))
+        elif str(a).strip():
+            todos.append("・" + str(a).strip())
+    if todos:
+        out.append("待辦事項：\n" + "\n".join(todos))
+    return out
+
+
 async def index_meeting(user_id: str, meeting_id: str):
-    """建立/更新某會議的向量索引(冪等,會先刪舊塊)。"""
+    """建立/更新某會議的向量索引(冪等,會先刪舊塊)。
+
+    索引兩種內容,以 chunks.type 區分:
+      transcript  逐字稿切塊(約 RAG_CHUNK_CHARS 字/塊)
+      summary     結構化摘要攤平(概述/重點/決議/待辦/後續)
+    摘要通常只有幾塊,成本很低,但能大幅提升「哪場會議做了什麼決議」這類問題的命中率。
+    """
     segs = await db.get_transcript(user_id, meeting_id)
-    if not segs:
-        return
-    chunks = _chunk_segments(segs, config.RAG_CHUNK_CHARS)
+    chunks = _chunk_segments(segs, config.RAG_CHUNK_CHARS) if segs else []
+    types = ["transcript"] * len(chunks)
+
+    sm = await db.get_summary(user_id, meeting_id)
+    if sm:
+        sc = _summary_chunks(sm)
+        chunks += sc
+        types += ["summary"] * len(sc)
+
     if not chunks:
         return
     try:
@@ -46,7 +91,7 @@ async def index_meeting(user_id: str, meeting_id: str):
         print(f"[rag] {meeting_id} 整批 embedding 失敗({e}),改逐筆重試")
         embs = await _embed.embed_each(chunks)
     # embedding 壞掉的塊仍然寫入(embedding=None):不進向量表,但關鍵字檢索照樣搜得到
-    rows = [{"seq": i, "text": chunks[i],
+    rows = [{"seq": i, "text": chunks[i], "type": types[i],
              "embedding": embs[i] if _embed.is_valid(embs[i]) else None}
             for i in range(len(chunks))]
     bad = sum(1 for r in rows if r["embedding"] is None)

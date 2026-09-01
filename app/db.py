@@ -70,7 +70,7 @@ async def init_db():
             CREATE UNIQUE INDEX IF NOT EXISTS uniq_seg ON transcript_segments(meeting_id, seq);
             CREATE TABLE IF NOT EXISTS chunks(
                 id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, meeting_id TEXT,
-                seq INTEGER, text TEXT
+                seq INTEGER, text TEXT, type TEXT DEFAULT 'transcript'
             );
             CREATE INDEX IF NOT EXISTS idx_chunks_meeting ON chunks(meeting_id);
             -- 會議標籤(使用者自訂,如「專案會議」「每週會議」):一場可多個,用來縮小 RAG 檢索範圍
@@ -81,6 +81,11 @@ async def init_db():
             CREATE INDEX IF NOT EXISTS idx_mtags_tag ON meeting_tags(tag);
             """
         )
+        # 既有 DB 補上 type 欄位(SQLite 的 ADD COLUMN 沒有 IF NOT EXISTS)
+        cur = await db.execute("PRAGMA table_info(chunks)")
+        if "type" not in {r[1] for r in await cur.fetchall()}:
+            await db.execute("ALTER TABLE chunks ADD COLUMN type TEXT DEFAULT 'transcript'")
+            print("[db] chunks 補上 type 欄位")
         await db.commit()
         # ⑥ RAG:sqlite-vec 向量表(user_id 分區,rowid = chunks.id)
         await db.enable_load_extension(True)
@@ -291,8 +296,8 @@ async def store_chunks(user_id: str, meeting_id: str, chunks: list[dict]):
     try:
         for ch in chunks:
             cur = await conn.execute(
-                "INSERT INTO chunks(user_id,meeting_id,seq,text) VALUES(?,?,?,?)",
-                (user_id, meeting_id, ch["seq"], ch["text"]))
+                "INSERT INTO chunks(user_id,meeting_id,seq,text,type) VALUES(?,?,?,?,?)",
+                (user_id, meeting_id, ch["seq"], ch["text"], ch.get("type", "transcript")))
             cid = cur.lastrowid
             if ch.get("embedding") is not None:
                 await conn.execute(
@@ -356,7 +361,7 @@ async def vector_search(user_id: str, query_emb, k: int = 8,
         ids = [h[0] for h in hits]
         ph = ",".join("?" * len(ids))
         cur = await conn.execute(
-            f"SELECT c.id, c.meeting_id, c.text, m.title, m.created_at "
+            f"SELECT c.id, c.meeting_id, c.text, c.type, m.title, m.created_at "
             f"FROM chunks c JOIN meetings m ON m.id=c.meeting_id WHERE c.id IN ({ph})", ids)
         meta = {r["id"]: dict(r) for r in await cur.fetchall()}
     finally:
@@ -367,6 +372,7 @@ async def vector_search(user_id: str, query_emb, k: int = 8,
         if r:
             out.append({"meeting_id": r["meeting_id"], "title": r["title"],
                         "created_at": r["created_at"], "snippet": r["text"],
+                        "type": r["type"] or "transcript",
                         "distance": round(float(dist), 4)})
     return out
 
@@ -472,7 +478,7 @@ async def keyword_search(user_id: str, query: str, k: int = 8,
         if terms:
             expr = " OR ".join(f'"{t}"' for t in terms)   # 雙引號:避免 FTS5 語法字元
             cur = await db.execute(
-                "SELECT c.meeting_id, c.text AS snippet, m.title, m.created_at, "
+                "SELECT c.meeting_id, c.text AS snippet, c.type, m.title, m.created_at, "
                 "       bm25(fts_chunks) AS score "
                 "FROM fts_chunks f JOIN chunks c ON c.id = f.rowid "
                 "JOIN meetings m ON m.id = c.meeting_id "
@@ -480,12 +486,13 @@ async def keyword_search(user_id: str, query: str, k: int = 8,
                 "ORDER BY score LIMIT ?", [expr, user_id] + margs + [k])
         else:
             cur = await db.execute(
-                "SELECT c.meeting_id, c.text AS snippet, m.title, m.created_at, 0 AS score "
+                "SELECT c.meeting_id, c.text AS snippet, c.type, m.title, m.created_at, 0 AS score "
                 "FROM chunks c JOIN meetings m ON m.id = c.meeting_id "
                 "WHERE c.user_id = ? AND c.text LIKE ?" + mfil + " "
                 "ORDER BY m.created_at DESC LIMIT ?", [user_id, f"%{q}%"] + margs + [k])
         return [{"meeting_id": r["meeting_id"], "title": r["title"],
-                 "created_at": r["created_at"], "snippet": r["snippet"]}
+                 "created_at": r["created_at"], "snippet": r["snippet"],
+                 "type": r["type"] or "transcript"}
                 for r in await cur.fetchall()]
 
 

@@ -20,7 +20,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app import config, db, llm
+from app import config, db, llm, rag
 from app.auth import get_current_user
 
 router = APIRouter(tags=["summary"])
@@ -173,6 +173,10 @@ async def summarize(mid: str,
 
             data = parse_markdown(md)
             await db.save_summary(mid, data)
+            try:   # 摘要也進向量庫,「哪場會議做了什麼決議」才查得到
+                await rag.index_meeting(user, mid)
+            except Exception as e:
+                print(f"[summarize] {mid} 重建索引失敗(摘要已存): {e}")
             yield _sse(data)
             yield "data: [DONE]\n\n"
         except Exception as e:

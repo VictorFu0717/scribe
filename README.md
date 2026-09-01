@@ -268,6 +268,10 @@ PUT /meetings/{id}/transcript
 - `user_id` 由 token 帶入，**不在 LLM 產生的參數裡** —— 助理無法查到別人的會議。
 - 標籤在**向量檢索之前**就限縮候選，不是查完再過濾。
 - 圖中的關鍵字側需 `RAG_HYBRID=1` 才啟用；預設走純向量（實測混合檢索與純向量打平，見下方）。
+- 索引兩種內容，以 `chunks.type` 區分：**`transcript`**（逐字稿切塊）與 **`summary`**
+  （結構化摘要攤平成 概述／重點／決議／待辦／後續）。檢索結果會帶 `type` 讓助理知道來源。
+  摘要通常只有幾塊、成本很低，但「哪場會議做了什麼決議」這類問題命中率高很多 ——
+  決議句在摘要裡是一句話，在逐字稿裡卻散落在「好啊那我們就這樣」之類的口語中。
 - 向量側用的是 **L2 歐氏距離**（sqlite-vec `vec0` 的預設，非 cosine）。bge-m3 回傳單位長度向量，
   此時 `‖a−b‖² = 2(1−cos)`，排序與 cosine 完全等價（已實測驗證）。
   ⚠️ 這是隱性依賴：若 `EMBED_MODEL` 換成**不做正規化**的模型，排序會悄悄變錯且無錯誤訊息 ——
@@ -517,11 +521,12 @@ GET /meetings/{id}/translation?target=en  → {"target","text"}   (未翻過回 
 - [x] 定稿前音訊守門（擋非語音幻覺與長靜音卡死；逾時退回預覽文字）
 - [x] **pyannote 語者分離**（上傳 `DIARIZE_SEGMENT=speaker` / 即時 `WS_DIARIZE`、`WS_SEGMENT`）
 - [x] 重建索引（`POST /meetings/{id}/reindex`、`POST /meetings/reindex`）
+- [x] 編輯逐字稿（`PUT /meetings/{id}/transcript`，整份覆寫 + 自動重建索引）
+- [x] 摘要進向量庫（`chunks.type` 區分 transcript / summary）
 - [x] **會議標籤**（使用者自訂、選填、可多個；助理據此縮小 RAG 檢索範圍）
 - [x] 更新會議（`PATCH /meetings/{id}`：標題 / 標籤）
 - [ ] 帳號審核制 + admin 管理（產品化時;register→待審→核准）
 - [ ] diarization 指定人數（`speaker_count`；pyannote 原生支援 `num_speakers`，待接 API）
-- [ ] 摘要進向量庫（目前只索引逐字稿，問「哪場做了X決議」命中不到結構化摘要）
 - [ ] **CER 測試集**（3~5 段真實會議 + 人工黃金逐字稿）—— 所有「辨識準確度」改進的前提
 - [ ] 重疊語音分離（`pyannote SpeechSeparation`；搶話型會議是目前最大的殘留誤差）
 
