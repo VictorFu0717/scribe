@@ -251,6 +251,10 @@ body: {"messages":[{"role","content"}...], "meeting_id":str|null, "language":"zh
 - `user_id` 由 token 帶入，**不在 LLM 產生的參數裡** —— 助理無法查到別人的會議。
 - 標籤在**向量檢索之前**就限縮候選，不是查完再過濾。
 - 圖中的關鍵字側需 `RAG_HYBRID=1` 才啟用；預設走純向量（實測混合檢索與純向量打平，見下方）。
+- 向量側用的是 **L2 歐氏距離**（sqlite-vec `vec0` 的預設，非 cosine）。bge-m3 回傳單位長度向量，
+  此時 `‖a−b‖² = 2(1−cos)`，排序與 cosine 完全等價（已實測驗證）。
+  ⚠️ 這是隱性依賴：若 `EMBED_MODEL` 換成**不做正規化**的模型，排序會悄悄變錯且無錯誤訊息 ——
+  屆時要在建表時加 `distance_metric=cosine` 並重建索引。
 
 ### 會議標籤（讓 RAG 檢索更精準）
 

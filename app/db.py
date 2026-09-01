@@ -86,6 +86,10 @@ async def init_db():
         await db.enable_load_extension(True)
         await db.load_extension(sqlite_vec.loadable_path())
         await db.enable_load_extension(False)
+        # ⚠️ 距離用 vec0 的**預設 L2**,不是 cosine。目前正確是因為 bge-m3 回傳單位長度向量,
+        # 此時 ‖a-b‖² = 2(1-cos) → 排序與 cosine 完全等價(已實測)。
+        # 換成**不做正規化**的 EMBED_MODEL 時排序會悄悄變錯且無錯誤訊息,
+        # 屆時要改成 `embedding float[N] distance_metric=cosine` 並重建索引(POST /meetings/reindex)。
         await db.execute(
             "CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0("
             f"user_id text partition key, embedding float[{config.EMBED_DIM}])")
