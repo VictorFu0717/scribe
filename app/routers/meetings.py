@@ -20,6 +20,18 @@ class CreateMeetingReq(BaseModel):
     tags: list[str] | None = None       # 使用者自訂標籤(選填),如「專案會議」「每週會議」
 
 
+class TranscriptSegmentIn(BaseModel):
+    """PUT 逐字稿的單一段落。形狀與 GET 回傳相容(多的欄位如 id/is_final 會被忽略)。"""
+    text: str
+    speaker: str | None = None
+    start_ms: int | None = None
+    end_ms: int | None = None
+
+
+class PutTranscriptReq(BaseModel):
+    segments: list[TranscriptSegmentIn]
+
+
 class UpdateMeetingReq(BaseModel):
     """PATCH 語意:沒帶的欄位不動;tags 帶空陣列 = 清空標籤。"""
     title: str | None = None
@@ -74,6 +86,39 @@ async def get_transcript(mid: str, user: str = Depends(get_current_user)):
     if segs is None:
         raise HTTPException(404, "meeting not found")
     return {"segments": segs}
+
+
+@router.put("/{mid}/transcript")
+async def put_transcript(mid: str, req: PutTranscriptReq,
+                         background_tasks: BackgroundTasks,
+                         user: str = Depends(get_current_user)):
+    """整份覆寫逐字稿(使用者在 App 修正錯字、說話者後回存)。
+
+    - **整組取代**:沒帶的段落等於刪除;seq 依陣列順序重編。
+    - **錄音中不可改**:即時串流正在逐句寫入同一張表,同時編輯會互相蓋掉,
+      故只允許 status=ready/error 的會議。
+    - 改完在背景重建向量索引,否則助理問答查到的還是舊文字。
+    """
+    m = await db.get_meeting(user, mid)
+    if m is None:
+        raise HTTPException(404, "meeting not found")
+    if m["status"] not in ("ready", "error"):
+        raise HTTPException(409, f"會議狀態為 {m['status']},請等轉錄完成後再編輯")
+
+    segs = [s.model_dump() for s in req.segments]
+    if any(not (s["text"] or "").strip() for s in segs):
+        raise HTTPException(400, "segments 內含空白文字;請先移除該段再送出")
+    await db.save_transcript(mid, segs)
+    background_tasks.add_task(_reindex_quiet, user, mid)
+    return {"id": mid, "segments": len(segs), "status": "saved"}
+
+
+async def _reindex_quiet(user: str, mid: str):
+    """背景重建索引;失敗只記 log,不影響已存好的逐字稿。"""
+    try:
+        await rag.index_meeting(user, mid)
+    except Exception as e:
+        print(f"[transcript] {mid} 重建索引失敗(逐字稿已存): {e}")
 
 
 @router.get("/{mid}/summary")

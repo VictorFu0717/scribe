@@ -242,6 +242,23 @@ body: {"messages":[{"role","content"}...], "meeting_id":str|null, "language":"zh
 > 帶 `meeting_id` → 以該場為「目前會議」;不帶 → 可跨會議。系統會注入「今天日期」,agent 能自行把
 > 「上週/上個月5號」換算成 `date_from/date_to` 傳給 `search_meetings`。工具註冊表好擴充(加工具 = 加 schema + handler)。
 
+### 編輯逐字稿 — `PUT /meetings/{id}/transcript`
+
+App 讓使用者修正辨識錯字、改說話者後整份回存。
+
+```
+PUT /meetings/{id}/transcript
+{"segments":[{"text":"…","speaker":"說話者1","start_ms":0,"end_ms":5000}, ...]}
+→ {"id":..,"segments":N,"status":"saved"}
+```
+> **整組取代**：沒帶的段落等於刪除，`seq` 依陣列順序重編。
+> 可以直接把 `GET .../transcript` 的回傳改一改再送回來（多餘的 `id`/`is_final` 欄位會被忽略）。
+>
+> - **錄音中不可編輯** → **409**。即時串流正逐句寫入同一張表，同時編輯會互相蓋掉；
+>   只允許 `status=ready`／`error`。
+> - 存檔後**背景自動重建向量索引**，否則助理問答查到的還是舊文字。
+> - 段落文字不可為空 → **400**（要刪就整段不要送）。
+
 ### 問答檢索流程
 
 ![RAG 詳細流程：上半為建立索引，逐字稿切塊後經 bge-m3 寫入三張表；下半為檢索，先用標籤限縮候選，再並行做向量與關鍵字檢索，以 RRF 合併](docs/scribe-03-rag.jpg)
