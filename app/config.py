@@ -15,11 +15,12 @@ DEVICE = os.getenv("DEVICE", "cuda")
 ASR_LANG = os.getenv("ASR_LANG") or None
 
 # --- 即時預覽後端 ────────────────────────────────────────────────────────────
-#   paraformer  FunASR paraformer-zh-streaming(預設)。原生串流、有 cache,
+#   nano        Fun-ASR-Nano-2512(800M,in-process vLLM)**預設**。沒有串流 cache,
+#               每次重解「語音起點到現在」的整個視窗 → 越長越貴,20s 視窗約 20% GPU/連線,
+#               單次更新 30-300ms。中英夾雜大幅優於 paraformer。
+#   paraformer  FunASR paraformer-zh-streaming。原生串流、有 cache,
 #               每次只算新 chunk → 成本與視窗長度無關,約 3% GPU/連線。
 #               但它是**純中文模型**,英文會爛掉(見下方實測)。
-#   nano        Fun-ASR-Nano-2512(800M,in-process vLLM)。沒有串流 cache,
-#               每次重解「語音起點到現在」的整個視窗 → 越長越貴,20s 視窗約 20% GPU/連線。
 #
 # ASCEND 語料實測(120 句真人中英夾雜 + 60 句純中文,MER = 中文按字/英文按詞):
 #              中英夾雜 MER   英文詞召回   純中文 MER
@@ -28,7 +29,9 @@ ASR_LANG = os.getenv("ASR_LANG") or None
 # 也就是:英文大幅改善、中文幾乎不動(SenseVoice 則是拿中文換英文,故未採用)。
 # nano 的串流品質與離線 batch 完全相同(13.2% vs 13.3%)—— 因為每次都重解整個視窗,
 # 最後一次更新已看過全部音訊,沒有「串流看不到後文」的劣勢。
-STREAM_BACKEND = os.getenv("STREAM_BACKEND", "paraformer")   # paraformer | nano
+# 預設 nano:實測英文詞召回 34.1% → 72.9%,純中文只從 6.8% 退到 7.1%。
+# 記憶體不足或要省 GPU 時設 STREAM_BACKEND=paraformer 切回。
+STREAM_BACKEND = os.getenv("STREAM_BACKEND", "nano")   # nano | paraformer
 NANO_MODEL = os.getenv("NANO_MODEL", "FunAudioLLM/Fun-ASR-Nano-2512")
 # vLLM 是 in-process(不是另一個 HTTP 服務),要自己讓出顯存給同機的 Qwen3-ASR 定稿服務。
 # ⚠️ 這是**佔總顯存的比例**,不是絕對值 —— 換到小卡要重算(96GB 上的 0.10 = 9.6GB,

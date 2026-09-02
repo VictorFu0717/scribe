@@ -17,8 +17,8 @@
 定稿與對話模型都在同一台機器的其他埠上、不對外開放。
 
 **為什麼這樣切**：Qwen3-ASR 的「串流」API 不支援 batch、無法併發；因此
-- **即時預覽**用輕量的 FunASR paraformer-streaming（本地、低延遲）；
-  中英夾雜的場合可切換成 Fun-ASR-Nano（`STREAM_BACKEND=nano`，見「即時預覽後端」）；
+- **即時預覽**用 Fun-ASR-Nano（本地、in-process vLLM，中英夾雜也準）；
+  想省 GPU 可切回輕量的 paraformer-streaming（`STREAM_BACKEND=paraformer`，見「即時預覽後端」）；
 - **定稿**丟給 `vllm serve` 的 Qwen3-ASR，vLLM 做 continuous batching → **真併發**。
 
 ### 併發模型（為什麼 `workers=1` 仍能同時服務多人）
@@ -421,7 +421,7 @@ GET /meetings/{id}/translation?target=en  → {"target","text"}   (未翻過回 
 | `UPLOAD_MAX_SEG_SEC` | `30` | 上傳轉錄:過長 VAD 段的再切秒數 |
 | `UPLOAD_CONCURRENCY` | `8` | 上傳轉錄:同時打 Qwen3-ASR 的段數上限 |
 | `STREAM_MODEL` / `VAD_MODEL` | `paraformer-zh-streaming` / `fsmn-vad` | 預覽 / 斷句模型 |
-| `STREAM_BACKEND` | `paraformer` | 即時預覽後端：`paraformer` / `nano`（見下節）|
+| `STREAM_BACKEND` | `nano` | 即時預覽後端：`nano` / `paraformer`（見下節）|
 | `NANO_GPU_FRAC` | `0.10` | nano 的 vLLM 顯存配額，**佔總顯存的比例**（96GB 卡 ≈ 9.6GB）|
 | `NANO_HOTWORDS` | *(空)* | 熱詞／context biasing，逗號分隔（公司術語、人名、專案代號）|
 | `NANO_MIN_MS` | `0` | 兩次預覽更新的最小間隔；`0` = 每個 chunk 都更新 |
@@ -473,8 +473,9 @@ GET /meetings/{id}/translation?target=en  → {"target","text"}   (未翻過回 
 
 ### 即時預覽後端（`STREAM_BACKEND`）
 
-預設的 `paraformer-zh-streaming` 是**純中文模型**，遇到英文會爛掉（`focus` → `cus`、
-`night` → `奶`）。`STREAM_BACKEND=nano` 改用 Fun-ASR-Nano-2512（800M，in-process vLLM）。
+預設是 **Fun-ASR-Nano-2512**（800M，in-process vLLM）。先前的
+`paraformer-zh-streaming` 是**純中文模型**，遇到英文會爛掉（`focus` → `cus`、`night` → `奶`），
+想省 GPU 時可用 `STREAM_BACKEND=paraformer` 切回。
 
 ASCEND 語料實測（120 句真人中英夾雜 + 60 句純中文；MER = 中文按字、英文按詞）：
 
@@ -520,7 +521,9 @@ CUDA graph），KV cache 需求極小（一個請求約 450 token：20s 音訊 e
 啟用：
 
 ```bash
-STREAM_BACKEND=nano NANO_HOTWORDS=長照,健保署,衛福部 python main.py
+python main.py                                   # 預設就是 nano
+NANO_HOTWORDS=長照,健保署,衛福部 python main.py    # 帶熱詞
+STREAM_BACKEND=paraformer python main.py         # 切回舊的輕量預覽
 ```
 
 首次啟動會多花數十秒載入 vLLM（`warmup()` 會預載，不會拖到第一條連線）。
