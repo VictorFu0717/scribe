@@ -92,7 +92,7 @@ async def ws_asr(ws: WebSocket):
                 t = models.to_tw(s["text"])
                 lines.append(f"{spk}：{t}" if spk else t)
             return "\n".join(lines)
-        return models.to_tw("".join(s["text"] for s in segments))
+        return models.to_tw(models.join_all(s["text"] for s in segments))
 
     def seg_list():
         return [{"speaker": s.get("speaker"), "text": models.to_tw(s["text"])} for s in segments]
@@ -100,10 +100,13 @@ async def ws_asr(ws: WebSocket):
     async def push_partial():
         committed = committed_str()
         tentative = models.to_tw(cur_preview)
-        sep = "\n" if (diarize_on and committed and tentative) else ""
+        if diarize_on and committed and tentative:
+            full = committed + "\n" + tentative
+        else:
+            full = models.join_text(committed, tentative)
         await send({
             "type": "partial", "committed": committed, "tentative": tentative,
-            "text": committed + sep + tentative, "language": config.ASR_LANG,
+            "text": full, "language": config.ASR_LANG,
             "diarization": diarize_on, "segments": seg_list(),
         })
 
@@ -293,7 +296,8 @@ async def ws_asr(ws: WebSocket):
         try:
             pf_res = await models.preview(chunk, pf_cache, is_final)
             if pf_res and pf_res[0].get("text"):
-                cur_preview += pf_res[0]["text"]
+                # 不能直接 += :片段之間沒有空白,英文會黏成一團(見 models.join_text)
+                cur_preview = models.join_text(cur_preview, pf_res[0]["text"])
         except Exception as e:
             await send({"type": "error", "detail": f"preview: {e}"})
 

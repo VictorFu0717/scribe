@@ -72,6 +72,35 @@ def to_tw(text: str) -> str:
         return text
 
 
+_WORDCH = re.compile(r"[0-9A-Za-z\u00c0-\u024f]")   # 拉丁字母/數字(含重音字母)
+
+
+def join_text(prev: str, piece: str) -> str:
+    """把新片段接到已累積文字後面,英文之間補空白。
+
+    paraformer 串流「單一片段內」是有空白的('your country'),但**片段之間從來沒有**,
+    所以直接 prev + piece 會把英文黏成一團:
+        'and so'+'my'+'low'+'ask'+'not' -> 'and somylowasknot'
+    中文不需要空白('我們'+'開會' -> '我們開會' 是對的),因此只在**兩側都是英數**時
+    才補一個空白;中英交界(如 '我們用'+'GPU')維持不加,那是中文的習慣寫法。
+    """
+    if not piece:
+        return prev
+    if not prev:
+        return piece
+    if _WORDCH.match(prev[-1]) and _WORDCH.match(piece[0]):
+        return prev + " " + piece
+    return prev + piece
+
+
+def join_all(parts) -> str:
+    """依 join_text 規則串接一串片段。"""
+    out = ""
+    for p in parts:
+        out = join_text(out, p)
+    return out
+
+
 def clean_qwen(raw: str) -> str:
     """Qwen3-ASR 經 vLLM 回傳夾帶的模板標記(如 language Chinese<asr_text>...)剝乾淨。"""
     if not raw:
