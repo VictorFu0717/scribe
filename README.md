@@ -422,7 +422,7 @@ GET /meetings/{id}/translation?target=en  → {"target","text"}   (未翻過回 
 | `UPLOAD_CONCURRENCY` | `8` | 上傳轉錄:同時打 Qwen3-ASR 的段數上限 |
 | `STREAM_MODEL` / `VAD_MODEL` | `paraformer-zh-streaming` / `fsmn-vad` | 預覽 / 斷句模型 |
 | `STREAM_BACKEND` | `paraformer` | 即時預覽後端：`paraformer` / `nano`（見下節）|
-| `NANO_GPU_FRAC` | `0.25` | nano 的 in-process vLLM 顯存配額（要讓給定稿服務）|
+| `NANO_GPU_FRAC` | `0.10` | nano 的 vLLM 顯存配額，**佔總顯存的比例**（96GB 卡 ≈ 9.6GB）|
 | `NANO_HOTWORDS` | *(空)* | 熱詞／context biasing，逗號分隔（公司術語、人名、專案代號）|
 | `NANO_MIN_MS` | `0` | 兩次預覽更新的最小間隔；`0` = 每個 chunk 都更新 |
 | `FUNASR_HUB` | `hf` | FunASR 下載來源（`hf`/`ms`）|
@@ -503,6 +503,19 @@ nano 的**串流品質與離線完全相同**（13.2% vs 13.3%），因為它每
 **不需要改 docker-compose**：nano 的 vLLM 是 **in-process**（跟著 `python main.py`
 一起啟動），不是另一個 HTTP 服務。`docker/` 底下的 Qwen3-ASR 定稿服務維持不變。
 只要注意 `NANO_GPU_FRAC` 要留夠顯存給它。
+
+顯存實測（96GB 卡、`max_model_len=2048`）——固定開銷約 6.7GB（權重 + 音訊編碼器 +
+CUDA graph），KV cache 需求極小（一個請求約 450 token：20s 音訊 embedding + ≤200 輸出）：
+
+| `NANO_GPU_FRAC` | 總佔用 | KV cache | vLLM 回報可併發 | 延遲（1／5 併發）|
+|:---:|:---:|---|:---:|:---:|
+| ≤0.06 | — | 負的 | ❌ 載不起來 | — |
+| 0.08 | ~7.7GB | 0.85GB / 7,904 tok | 3.8 | 125／238ms |
+| **0.10** | **~9.6GB** | 2.74GB / 25,680 tok | **12.5** | 127／215ms |
+| 0.25 | ~24GB | 17GB / 159,056 tok | 77 | 128／228ms |
+
+**延遲三者相同**，多給的顯存純粹閒置。⚠️ 這是**比例不是絕對值**：換到 24GB 卡時
+`0.10` 只有 2.4GB，會載不起來 —— 換卡要重算。
 
 啟用：
 

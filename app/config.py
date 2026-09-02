@@ -30,9 +30,16 @@ ASR_LANG = os.getenv("ASR_LANG") or None
 # 最後一次更新已看過全部音訊,沒有「串流看不到後文」的劣勢。
 STREAM_BACKEND = os.getenv("STREAM_BACKEND", "paraformer")   # paraformer | nano
 NANO_MODEL = os.getenv("NANO_MODEL", "FunAudioLLM/Fun-ASR-Nano-2512")
-# vLLM 是 in-process(不是另一個 HTTP 服務),所以要自己讓出顯存給同機的
-# Qwen3-ASR 定稿服務與其他租戶 —— 0.25 在 96GB 卡上約 24GB,對 800M 模型綽綽有餘。
-NANO_GPU_FRAC = float(os.getenv("NANO_GPU_FRAC", "0.25"))
+# vLLM 是 in-process(不是另一個 HTTP 服務),要自己讓出顯存給同機的 Qwen3-ASR 定稿服務。
+# ⚠️ 這是**佔總顯存的比例**,不是絕對值 —— 換到小卡要重算(96GB 上的 0.10 = 9.6GB,
+#    24GB 卡上只有 2.4GB,會載不起來)。
+# 實測(96GB 卡,max_model_len=2048):
+#   0.06 以下  KV cache 算出來是負的 → 載不起來(固定開銷約 6.7GB:權重+音訊編碼器+CUDA graph)
+#   0.08       KV 0.85GB / 7,904 tok  → 可併發 3.8
+#   0.10       KV 2.74GB / 25,680 tok → 可併發 12.5   ← 預設
+#   0.25       KV 17GB  / 159,056 tok → 可併發 77(延遲與 0.10 完全相同,多的全浪費)
+# 一個請求約 450 token(20s 音訊 embedding + ≤200 輸出),所以 0.10 已是需求的數十倍。
+NANO_GPU_FRAC = float(os.getenv("NANO_GPU_FRAC", "0.10"))
 NANO_MAX_LEN = int(os.getenv("NANO_MAX_LEN", "2048"))
 NANO_LANG = os.getenv("NANO_LANG", "中文")      # 夾雜英文照樣轉得出來,這只是提示
 NANO_MAX_TOKENS = int(os.getenv("NANO_MAX_TOKENS", "200"))
