@@ -31,13 +31,19 @@ services:
       # - HF_TOKEN=${HF_TOKEN}      # 只有私有/受限模型才需要
     # vLLM 建議:共享記憶體給 NCCL / tensor 並行用
     ipc: host
+    # --gpu-memory-utilization:實測 20s 音檔的定稿請求,KV cache 峰值使用率 ——
+    #   1 併發 0.38% / 5 併發 0.74% / 10 併發 1.20% / 20 併發 2.10%(原本 0.2 = 約 19GB)。
+    #   定稿是「音訊進、一句話出」,沒有多輪對話歷史,用完就釋放,所以 KV 需求極小
+    #   (對話 LLM 才需要大 KV cache)。0.08 在 96GB 卡上約 7.7GB,對 5 人綽綽有餘。
+    #   ⚠️ 這是佔**總顯存的比例**不是絕對值,換小卡要重算。
+    #   改完重啟後看這行確認:"GPU KV cache size" / "Maximum concurrency for ... per request"
     # entrypoint 已是 qwen-asr-serve(= 註冊 qwen3_asr 後轉呼 vllm serve),
     # 故這裡直接給 serve 的參數;模型用位置參數(--model 已被 vLLM 標記淘汰)
     command: >
       Qwen/Qwen3-ASR-1.7B
       --served-model-name Qwen/Qwen3-ASR-1.7B
       --port 8000
-      --gpu-memory-utilization 0.2
+      --gpu-memory-utilization 0.08
       --enforce-eager
     deploy:
       resources:
