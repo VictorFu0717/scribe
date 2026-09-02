@@ -22,7 +22,7 @@ import json
 import numpy as np
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from app import config, db, models, rag
+from app import config, db, models, rag, nano_asr
 from app.auth import decode_jwt, tailscale_whois
 from app import pyannote_diar
 from app.diarize import SpeakerClusterer
@@ -56,6 +56,7 @@ async def ws_asr(ws: WebSocket):
     seg_dur = 0.0
     segments: list = []                 # {"text","speaker","start_ms","end_ms"}
     cur_preview = ""
+    last_nano_ms = -10 ** 9         # 上次跑 nano 預覽的時間(給 NANO_MIN_MS 節流用)
     pad_tail = np.zeros(0, dtype=np.float32)   # 上一段的尾巴,補到下一段前面當 lead-in
     diarize_on = config.DIARIZE_DEFAULT
     clusterer = SpeakerClusterer(config.SPK_THRESHOLD, config.SPK_PREFIX,
@@ -274,7 +275,7 @@ async def ws_asr(ws: WebSocket):
             await push_partial()
 
     async def process_chunk(chunk, is_final):
-        nonlocal cur_preview, seg_dur, elapsed_ms
+        nonlocal cur_preview, seg_dur, elapsed_ms, last_nano_ms
         if chunk.size:
             seg_samples.append(chunk)
             seg_dur += chunk.size / config.SAMPLE_RATE
@@ -294,10 +295,24 @@ async def ws_asr(ws: WebSocket):
             pass
 
         try:
-            pf_res = await models.preview(chunk, pf_cache, is_final)
-            if pf_res and pf_res[0].get("text"):
-                # 不能直接 += :片段之間沒有空白,英文會黏成一團(見 models.join_text)
-                cur_preview = models.join_text(cur_preview, pf_res[0]["text"])
+            if nano_asr.enabled():
+                # Nano 沒有串流 cache:重解「語音起點到現在」的整個視窗,
+                # 所以是**取代** cur_preview 而不是累加(視窗已含先前所有音訊)。
+                # 視窗長度天然被 MAX_SEG_SEC 與 close_segment() 綁住,不會無限成長。
+                nonlocal_ok = (config.NANO_MIN_MS <= 0
+                               or elapsed_ms - last_nano_ms >= config.NANO_MIN_MS)
+                if seg_samples and (nonlocal_ok or is_final):
+                    txt = await nano_asr.preview(np.concatenate(seg_samples))
+                    last_nano_ms = elapsed_ms
+                    if txt is not None:
+                        cur_preview = txt
+                    elif not nano_asr.enabled():
+                        cur_preview = ""      # 剛退回 paraformer,別把兩種輸出接在一起
+            else:
+                pf_res = await models.preview(chunk, pf_cache, is_final)
+                if pf_res and pf_res[0].get("text"):
+                    # 不能直接 += :片段之間沒有空白,英文會黏成一團(見 models.join_text)
+                    cur_preview = models.join_text(cur_preview, pf_res[0]["text"])
         except Exception as e:
             await send({"type": "error", "detail": f"preview: {e}"})
 
@@ -310,7 +325,9 @@ async def ws_asr(ws: WebSocket):
     def reset_all():
         nonlocal pf_cache, vad_cache, audio_buf, seg_samples, seg_dur
         nonlocal cur_preview, clusterer, elapsed_ms, seg_start_ms, pad_tail, spk_seen, sdiar, sdiar_cuts
+        nonlocal last_nano_ms
         pf_cache = {}
+        last_nano_ms = -10 ** 9
         vad_cache = {}
         audio_buf = np.zeros(0, dtype=np.float32)
         seg_samples = []

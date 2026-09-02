@@ -18,6 +18,7 @@
 
 **為什麼這樣切**：Qwen3-ASR 的「串流」API 不支援 batch、無法併發；因此
 - **即時預覽**用輕量的 FunASR paraformer-streaming（本地、低延遲）；
+  中英夾雜的場合可切換成 Fun-ASR-Nano（`STREAM_BACKEND=nano`，見「即時預覽後端」）；
 - **定稿**丟給 `vllm serve` 的 Qwen3-ASR，vLLM 做 continuous batching → **真併發**。
 
 ### 併發模型（為什麼 `workers=1` 仍能同時服務多人）
@@ -420,6 +421,10 @@ GET /meetings/{id}/translation?target=en  → {"target","text"}   (未翻過回 
 | `UPLOAD_MAX_SEG_SEC` | `30` | 上傳轉錄:過長 VAD 段的再切秒數 |
 | `UPLOAD_CONCURRENCY` | `8` | 上傳轉錄:同時打 Qwen3-ASR 的段數上限 |
 | `STREAM_MODEL` / `VAD_MODEL` | `paraformer-zh-streaming` / `fsmn-vad` | 預覽 / 斷句模型 |
+| `STREAM_BACKEND` | `paraformer` | 即時預覽後端：`paraformer` / `nano`（見下節）|
+| `NANO_GPU_FRAC` | `0.25` | nano 的 in-process vLLM 顯存配額（要讓給定稿服務）|
+| `NANO_HOTWORDS` | *(空)* | 熱詞／context biasing，逗號分隔（公司術語、人名、專案代號）|
+| `NANO_MIN_MS` | `0` | 兩次預覽更新的最小間隔；`0` = 每個 chunk 都更新 |
 | `FUNASR_HUB` | `hf` | FunASR 下載來源（`hf`/`ms`）|
 | `ASR_TRADITIONAL` | `1` | 簡→繁台灣用語轉換 |
 | `MAX_SEG_SEC` | `20` | ws 端安全切段秒數（VAD 沒斷時的後盾）|
@@ -465,6 +470,48 @@ GET /meetings/{id}/translation?target=en  → {"target","text"}   (未翻過回 
 | 中等雜訊 / 嗡嗡聲 | 正常回空字串 |
 
 定稿佇列是**單一序列**處理，所以一段靜音卡住 → 該場會議後續全部定稿被堵住；斷線收尾只等 8 秒，逾時就丟掉還沒寫入的句子。因此：
+
+### 即時預覽後端（`STREAM_BACKEND`）
+
+預設的 `paraformer-zh-streaming` 是**純中文模型**，遇到英文會爛掉（`focus` → `cus`、
+`night` → `奶`）。`STREAM_BACKEND=nano` 改用 Fun-ASR-Nano-2512（800M，in-process vLLM）。
+
+ASCEND 語料實測（120 句真人中英夾雜 + 60 句純中文；MER = 中文按字、英文按詞）：
+
+| 後端 | 中英夾雜 MER | 英文詞召回 | 純中文 MER |
+|---|:---:|:---:|:---:|
+| `paraformer` | 22.3% | 34.1% | **6.8%** |
+| `nano` | **13.2%** | **72.9%** | 7.1% |
+
+**英文大幅改善、中文幾乎不動。**（SenseVoice-Small 也測過：中英夾雜 15.4%，
+但純中文退到 9.4% —— 那是拿中文換英文，所以沒採用。）
+
+nano 的**串流品質與離線完全相同**（13.2% vs 13.3%），因為它每次重解「語音起點到
+現在」的整個視窗，最後一次更新已看過全部音訊，沒有「串流看不到後文」的劣勢。
+
+**代價是 GPU：**
+
+| | 每次更新的計算量 | 20s 視窗延遲 | 單連線 GPU |
+|---|---|:---:|:---:|
+| `paraformer` | 只算新 chunk（有 cache）| — | ~3% |
+| `nano` | 重解整個視窗 | 143ms（最慢 295ms）| ~20% |
+
+併發上限依實作而定：目前 `nano_asr` 用 semaphore 序列化，約 **5 人**；
+實測若把同時到達的請求合併成一批送進 vLLM，32 個連線的成本只有 1 個的 5 倍，
+可到 **~24 人**——但那需要另外寫一層批次收集器（尚未實作）。
+
+**不需要改 docker-compose**：nano 的 vLLM 是 **in-process**（跟著 `python main.py`
+一起啟動），不是另一個 HTTP 服務。`docker/` 底下的 Qwen3-ASR 定稿服務維持不變。
+只要注意 `NANO_GPU_FRAC` 要留夠顯存給它。
+
+啟用：
+
+```bash
+STREAM_BACKEND=nano NANO_HOTWORDS=長照,健保署,衛福部 python main.py
+```
+
+首次啟動會多花數十秒載入 vLLM（`warmup()` 會預載，不會拖到第一條連線）。
+載入失敗或單次解碼失敗都會**自動退回 paraformer**，不影響連線。
 
 - **`FINALIZE_TIMEOUT`**：讓卡住有上界（原本 SDK 預設 600s）。逾時保留 paraformer 預覽文字寫入 DB，不讓整句消失。
 - **`MIN_SEG_RMS` / `MIN_SEG_MS`**：非語音段根本不送定稿。

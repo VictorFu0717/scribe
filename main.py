@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app import config, db, models
+from app import config, db, models, nano_asr
 from app.assistant import router as assistant_router
 from app.auth import router as auth_router
 from app.chat_qa import router as qa_router
@@ -36,8 +36,10 @@ from app.ws import router as ws_router
 async def lifespan(app: FastAPI):
     await db.init_db()
     await models.startup()
+    await nano_asr.warmup()      # STREAM_BACKEND=nano 才會真的載入(否則零顯存)
     yield
     await models.shutdown()
+    nano_asr.shutdown()
 
 
 app = FastAPI(title="scribe server", lifespan=lifespan)

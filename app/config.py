@@ -13,6 +13,34 @@ FUNASR_HUB = os.getenv("FUNASR_HUB", "hf")   # 本機 hf 下載遠快於 ms
 DEVICE = os.getenv("DEVICE", "cuda")
 
 ASR_LANG = os.getenv("ASR_LANG") or None
+
+# --- 即時預覽後端 ────────────────────────────────────────────────────────────
+#   paraformer  FunASR paraformer-zh-streaming(預設)。原生串流、有 cache,
+#               每次只算新 chunk → 成本與視窗長度無關,約 3% GPU/連線。
+#               但它是**純中文模型**,英文會爛掉(見下方實測)。
+#   nano        Fun-ASR-Nano-2512(800M,in-process vLLM)。沒有串流 cache,
+#               每次重解「語音起點到現在」的整個視窗 → 越長越貴,20s 視窗約 20% GPU/連線。
+#
+# ASCEND 語料實測(120 句真人中英夾雜 + 60 句純中文,MER = 中文按字/英文按詞):
+#              中英夾雜 MER   英文詞召回   純中文 MER
+#   paraformer     22.3%        34.1%        6.8%
+#   nano           13.2%        72.9%        7.1%
+# 也就是:英文大幅改善、中文幾乎不動(SenseVoice 則是拿中文換英文,故未採用)。
+# nano 的串流品質與離線 batch 完全相同(13.2% vs 13.3%)—— 因為每次都重解整個視窗,
+# 最後一次更新已看過全部音訊,沒有「串流看不到後文」的劣勢。
+STREAM_BACKEND = os.getenv("STREAM_BACKEND", "paraformer")   # paraformer | nano
+NANO_MODEL = os.getenv("NANO_MODEL", "FunAudioLLM/Fun-ASR-Nano-2512")
+# vLLM 是 in-process(不是另一個 HTTP 服務),所以要自己讓出顯存給同機的
+# Qwen3-ASR 定稿服務與其他租戶 —— 0.25 在 96GB 卡上約 24GB,對 800M 模型綽綽有餘。
+NANO_GPU_FRAC = float(os.getenv("NANO_GPU_FRAC", "0.25"))
+NANO_MAX_LEN = int(os.getenv("NANO_MAX_LEN", "2048"))
+NANO_LANG = os.getenv("NANO_LANG", "中文")      # 夾雜英文照樣轉得出來,這只是提示
+NANO_MAX_TOKENS = int(os.getenv("NANO_MAX_TOKENS", "200"))
+# 熱詞(context biasing):公司術語、人名、專案代號。逗號分隔。
+NANO_HOTWORDS = [w.strip() for w in os.getenv("NANO_HOTWORDS", "").split(",") if w.strip()]
+# 兩次預覽更新的最小間隔(ms)。0 = 每個 chunk 都更新(最即時)。
+# 視窗長時每次要 ~150-300ms,調大可省 GPU,代價是預覽更新變慢。
+NANO_MIN_MS = int(os.getenv("NANO_MIN_MS", "0"))
 MAX_SEG_SEC = float(os.getenv("MAX_SEG_SEC", "20"))   # ws 端安全切段(VAD 沒斷時的後盾)
 
 # VAD 斷句停頓門檻(ms):停頓超過這麼久才斷句。權衡:
