@@ -165,6 +165,11 @@ CHAT_THINK = os.getenv("CHAT_THINK", "0") in ("1", "true", "True")   # 預設關
 OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "30m")            # ollama 原生呼叫帶,避免模型被踢出重載
 
 # --- Embedding (⑥ RAG;預設 Ollama bge-m3) ---
+# vLLM 也跑得動同一個模型(vllm serve BAAI/bge-m3 --runner pooling),換後端只要改這個 URL。
+# 實測兩邊**向量完全相同**(餘弦相似度 1.0000、top-10 檢索排序一致)→ 既有索引不必重建。
+# 速度 vLLM 快 7 倍(993 vs 141 塊/秒),但 embedding 只在建索引與查詢時各跑一次,
+# 一場會議約 30 塊 = 0.2s vs 0.03s,實務上沒差 —— 而 Ollama 本來就要為 qwen3.6 常駐,
+# bge-m3 是搭順風車。等哪天 qwen3.6 也搬去 vLLM、Ollama 只剩它一個用戶時再一起搬。
 EMBED_BASE_URL = os.getenv("EMBED_BASE_URL", "http://localhost:11434/v1")
 EMBED_API_KEY = os.getenv("EMBED_API_KEY", "ollama")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "bge-m3")
