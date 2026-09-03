@@ -473,7 +473,7 @@ GET /meetings/{id}/translation?target=en  → {"target","text"}   (未翻過回 
 
 ### 即時預覽後端（`STREAM_BACKEND`）
 
-預設是 **Fun-ASR-Nano-2512**（800M，in-process vLLM）。先前的
+預設是 **Fun-ASR-Nano-2512**（985M：Qwen3-0.6B 骨幹 + 221M 音訊編碼器，in-process vLLM）。先前的
 `paraformer-zh-streaming` 是**純中文模型**，遇到英文會爛掉（`focus` → `cus`、`night` → `奶`），
 想省 GPU 時可用 `STREAM_BACKEND=paraformer` 切回。
 

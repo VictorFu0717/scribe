@@ -15,7 +15,7 @@ DEVICE = os.getenv("DEVICE", "cuda")
 ASR_LANG = os.getenv("ASR_LANG") or None
 
 # --- 即時預覽後端 ────────────────────────────────────────────────────────────
-#   nano        Fun-ASR-Nano-2512(800M,in-process vLLM)**預設**。沒有串流 cache,
+#   nano        Fun-ASR-Nano-2512(985M,in-process vLLM)**預設**。沒有串流 cache,
 #               每次重解「語音起點到現在」的整個視窗 → 越長越貴,20s 視窗約 20% GPU/連線,
 #               單次更新 30-300ms。中英夾雜大幅優於 paraformer。
 #   paraformer  FunASR paraformer-zh-streaming。原生串流、有 cache,
