@@ -60,6 +60,7 @@ app/
 ├── rag.py                 ⑥ 切塊/索引/檢索(向量 + 可選 hybrid)
 ├── summarize.py           ④ 會議摘要(SSE)
 ├── assistant.py           ⑤ agentic 助理(SSE + 工具)
+├── diagram.py             ⑦ 會議圖表(產 Mermaid,App 端渲染)
 ├── translate.py           留檔翻譯(SSE)
 ├── chat_qa.py             /meeting/chat 單場問答(舊端點)
 ├── auth.py                ⑦ JWT / Tailscale 身分
@@ -237,11 +238,47 @@ Server → Client (JSON):
 ```
 body: {"messages":[{"role","content"}...], "meeting_id":str|null, "language":"zh-Hant"}
 回傳(text/event-stream): data: {"delta":"..."}  ...  data: [DONE]
+                        data: {"type":"diagram", ...}      ← 畫圖時才有,見下節
 ```
 > 手寫 **agent loop**:LLM 自行決定是否呼叫工具(多輪),最後串流答案。工具:
-> `get_meeting_transcript` / `get_meeting_summary` / `list_meetings` / `search_meetings`(**語意檢索**,可帶日期範圍)。
+> `get_meeting_transcript` / `get_meeting_summary` / `list_meetings` / `search_meetings`(**語意檢索**,可帶日期範圍)
+> / `draw_meeting_diagram`(**畫成圖表**)。
 > 帶 `meeting_id` → 以該場為「目前會議」;不帶 → 可跨會議。系統會注入「今天日期」,agent 能自行把
 > 「上週/上個月5號」換算成 `date_from/date_to` 傳給 `search_meetings`。工具註冊表好擴充(加工具 = 加 schema + handler)。
+
+### 會議圖表 — agent 工具 `draw_meeting_diagram`
+
+使用者說「把這場會議畫成流程圖」「整理成關係圖」時，agent 自己呼叫。四種圖：
+
+| `kind` | 畫什麼 | Mermaid |
+|---|---|---|
+| `flow` | 流程、步驟、決策分支 | `flowchart TD` |
+| `relation` | 人／單位／系統／專案的關聯 | `graph LR` |
+| `timeline` | 里程碑與期程 | `timeline` |
+| `mindmap` | 主題階層 | `mindmap` |
+
+沒指定 `kind` 時由 LLM 依內容挑；可帶 `focus` 只畫某個子主題。
+
+**圖走自己的 SSE 事件，不回到 LLM 的上下文：**
+
+```json
+{"type":"diagram", "kind":"flow", "meeting_id":"...", "source":"summary",
+ "code":"flowchart TD\n    n1[\"系統登入\"] --> n2{\"案件來源\"}\n ...",
+ "hint":"這場會議還沒有摘要…"}
+```
+
+> **App 端要做的**：收到這個事件就用 mermaid.js 渲染 `code`（WebView 載 mermaid.js
+> 最省事）。`hint` 只在沒摘要時出現，可做成提示橫幅。
+
+設計取捨：
+- **產 Mermaid 原始碼而非圖片** —— 純文字 LLM 直接生得出來，不必在推論路徑上掛瀏覽器；
+  App 端渲染才能縮放／點選。真要圖片，在 `diagram.build()` 後面補 renderer 即可。
+- **不讓 LLM 覆述原始碼** —— 既浪費 token，轉抄時又容易改壞語法。工具只回一句
+  「已產生並顯示」，請它用一兩句話說明圖的內容。
+- **輸入優先用摘要** —— 逐字稿是口語、細節散落，畫出來差一截。沒摘要時回傳 `hint`
+  告訴使用者「產生摘要後重畫會更準確」。
+- **語法驗證 + 一次自我修正** —— LLM 最常犯的是加 ``` 圍欄、拿中文當節點 id、括號不成對；
+  `validate()` 擋下後把錯誤餵回去重出一次（真實會議上實測觸發過並成功修正）。
 
 ### 編輯逐字稿 — `PUT /meetings/{id}/transcript`
 
@@ -411,6 +448,7 @@ GET /meetings/{id}/translation?target=en  → {"target","text"}   (未翻過回 
 | `EMBED_MODEL` | `bge-m3` | Embedding 模型（1024 維）|
 | `EMBED_DIM` | `1024` | 向量維度（換模型要一起改）|
 | `RAG_CHUNK_CHARS` | `400` | 逐字稿切塊字元數 |
+| `DIAGRAM_MAX_CHARS` | `6000` | 畫圖時沒摘要才讀逐字稿，截斷長度 |
 | `RAG_HYBRID` | `0` | `0`=**純向量（預設）**；`1`=向量＋關鍵字 RRF 混合。實測混合未帶來品質提升，見下方 |
 | `RAG_RRF_K` | `60` | RRF 常數：`score = Σ 1/(K + 名次)`。越大越像投票、越小越偏袒各自第一名 |
 | `TRANSLATE_MAP_CHARS` | `3000` | 留檔翻譯:超過此長度就分段翻 |

@@ -1,0 +1,112 @@
+<style>
+ body{margin:0;background:#fff}
+ svg{display:block}
+ .lbl{font:600 15px/1 "Noto Sans CJK TC",sans-serif;fill:#b45309;letter-spacing:.05em}
+ .ttl{font:700 21px/1 "Noto Sans CJK TC",sans-serif;fill:#0f172a}
+ .t{font:600 19px/1 "Noto Sans CJK TC",sans-serif;fill:#0f172a}
+ .m{font:400 15px/1 "DejaVu Sans Mono","Noto Sans CJK TC",monospace;fill:#64748b}
+ .b{font:400 16px/1 "Noto Sans CJK TC",sans-serif;fill:#475569}
+ .box{fill:#fff;stroke:#cbd5e1;stroke-width:1.5;rx:6}
+ .grey{fill:#e2e8f0;stroke:#cbd5e1;stroke-width:1.5;rx:6}
+ .shell{fill:#dde5ec;stroke:#c3cfd9;stroke-width:1.5;rx:8}
+ .teal{fill:#e6f4f1;stroke:#0f766e;stroke-width:2;rx:6}
+ .hi{fill:#fff;stroke:#c2410c;stroke-width:2;rx:6}
+ .ar{stroke:#475569;stroke-width:2;fill:none;marker-end:url(#a)}
+ .aro{stroke:#b45309;stroke-width:2.5;fill:none;marker-end:url(#o)}
+</style>
+<svg width="1790" height="1540" viewBox="0 0 1790 1540" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#475569"/></marker>
+<marker id="o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#b45309"/></marker>
+</defs>
+
+<text class="lbl" x="42" y="60">用戶端</text>
+<rect class="box" x="410" y="88" width="480" height="112"/>
+<text class="ttl" x="650" y="132" text-anchor="middle">Flutter App</text>
+<text class="m"   x="650" y="168" text-anchor="middle">iOS · Android · 錄音 / 上傳 / 問答</text>
+<rect class="box" x="975" y="88" width="480" height="112"/>
+<text class="ttl" x="1215" y="132" text-anchor="middle">瀏覽器</text>
+<text class="m"   x="1215" y="168" text-anchor="middle">test.html · 開發測試用</text>
+<path class="ar" d="M650 200 L650 286"/>
+<path class="ar" d="M1215 200 L1215 286"/>
+
+<text class="lbl" x="42" y="352">連線通道</text>
+<rect class="grey" x="410" y="290" width="480" height="126"/>
+<text class="ttl" x="650" y="338" text-anchor="middle">OpenVPN（公司既有）</text>
+<text class="m"   x="650" y="376" text-anchor="middle">192.168.0.94:8005</text>
+<rect class="grey" x="975" y="290" width="480" height="126"/>
+<text class="ttl" x="1215" y="338" text-anchor="middle">Tailscale</text>
+<text class="m"   x="1215" y="376" text-anchor="middle">100.68.0.81:8005</text>
+<path class="ar" d="M650 416 L650 506"/>
+<path class="ar" d="M1215 416 L1215 506"/>
+
+<rect class="shell" x="128" y="510" width="1600" height="500"/>
+<text class="ttl" x="168" y="562">scribe server</text>
+<text class="m"   x="400" y="562">FastAPI · :8005 · 單 process（模型只載一份）</text>
+<rect class="box" x="168" y="592" width="1520" height="64"/>
+<text class="t" x="196" y="632">身分驗證 JWT</text>
+<text class="m" x="420" y="632">→ user_id：所有會議、向量、標籤的多租戶分區鍵</text>
+
+<rect class="box" x="168" y="686" width="480" height="296"/>
+<text class="ttl" x="196" y="730">即時轉錄</text>
+<text class="m"   x="196" y="768">WS /ws/asr</text>
+<text class="b"   x="196" y="806">Fun-ASR-Nano 預覽 · VAD 斷句</text>
+<text class="b"   x="196" y="840">語者標籤 · 逐句寫入</text>
+<text class="b"   x="196" y="874">斷線可續錄</text>
+<text class="m"   x="196" y="952">ws.py · nano_asr.py · stream_diar.py</text>
+
+<rect class="box" x="688" y="686" width="480" height="296"/>
+<text class="ttl" x="716" y="730">整檔上傳</text>
+<text class="m"   x="716" y="768">POST /meetings/{id}/audio</text>
+<text class="b"   x="716" y="806">m4a / wav / mp3 解碼</text>
+<text class="b"   x="716" y="840">語者分離 · 切段</text>
+<text class="b"   x="716" y="874">併發定稿（背景）</text>
+<text class="m"   x="716" y="952">upload.py</text>
+
+<rect class="box" x="1208" y="686" width="480" height="296"/>
+<text class="ttl" x="1236" y="730">摘要 · 助理 · 翻譯</text>
+<text class="m"   x="1236" y="768">SSE 串流</text>
+<text class="b"   x="1236" y="806">會議摘要（map-reduce）</text>
+<text class="b"   x="1236" y="840">跨會議問答 + 檢索</text>
+<text class="b"   x="1236" y="874">會議圖表（Mermaid）</text>
+<text class="b"   x="1236" y="908">留檔翻譯</text>
+<text class="m"   x="1236" y="952">summarize / assistant / diagram</text>
+
+<text class="lbl" x="42" y="1180">推論服務</text>
+<rect class="hi"  x="310" y="1096" width="330" height="164"/>
+<text class="ttl" x="336" y="1142">Fun-ASR-Nano</text>
+<text class="m"   x="336" y="1180">985M · in-process</text>
+<text class="m"   x="336" y="1210">（與 server 同行程）</text>
+<text class="b"   x="336" y="1244">即時預覽</text>
+
+<rect class="box" x="662" y="1096" width="330" height="164"/>
+<text class="ttl" x="688" y="1142">Qwen3-ASR 1.7B</text>
+<text class="m"   x="688" y="1180">vLLM · :9000 · Docker</text>
+<text class="b"   x="688" y="1220">定稿（continuous batching）</text>
+
+<rect class="box" x="1014" y="1096" width="330" height="164"/>
+<text class="ttl" x="1040" y="1142">qwen3.6</text>
+<text class="m"   x="1040" y="1180">vLLM :8004 / Ollama :11434</text>
+<text class="b"   x="1040" y="1214">摘要 / 助理 / 翻譯</text>
+<text class="b"   x="1040" y="1246">會議圖表</text>
+
+<rect class="box" x="1366" y="1096" width="330" height="164"/>
+<text class="ttl" x="1392" y="1142">bge-m3</text>
+<text class="m"   x="1392" y="1180">vLLM / Ollama :11434</text>
+<text class="b"   x="1392" y="1220">1024 維向量</text>
+
+<path class="aro" d="M360 986 L430 1090"/>
+<path class="aro" d="M470 986 L730 1090"/>
+<path class="aro" d="M905 986 L850 1090"/>
+<path class="aro" d="M1300 986 L1140 1090"/>
+<path class="aro" d="M1560 986 L1540 1090"/>
+
+<path d="M196 1010 L196 1358" stroke="#0f766e" stroke-width="2" stroke-dasharray="7 6" fill="none" marker-end="url(#a)"/>
+<text class="b" x="212" y="1052">逐句寫入</text>
+<text class="b" x="212" y="1082">向量索引</text>
+<text class="lbl" x="42" y="1420">儲存</text>
+<rect class="teal" x="310" y="1362" width="1386" height="132"/>
+<text class="ttl" x="340" y="1406">SQLite（單一檔案）</text>
+<text class="m"   x="340" y="1442">meetings · meeting_tags · transcript_segments · summaries · translations · users</text>
+<text class="m"   x="340" y="1474">chunks（type: transcript / summary）· vec_chunks（sqlite-vec）· fts_chunks（FTS5 trigram）</text>
+</svg>
