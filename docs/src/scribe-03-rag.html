@@ -1,0 +1,116 @@
+<style>
+ body{margin:0;background:#fff}
+ svg{display:block}
+ .lbl{font:600 15px/1 "Noto Sans CJK TC",sans-serif;fill:#b45309;letter-spacing:.05em}
+ .t{font:700 20px/1 "Noto Sans CJK TC",sans-serif;fill:#0f172a}
+ .tc{font:700 20px/1 "Noto Sans CJK TC",sans-serif;fill:#0f172a;text-anchor:middle}
+ .s{font:400 15px/1 "DejaVu Sans Mono","Noto Sans CJK TC",monospace;fill:#64748b}
+ .sc{font:400 15px/1 "DejaVu Sans Mono","Noto Sans CJK TC",monospace;fill:#64748b;text-anchor:middle}
+ .n{font:400 15px/1 "Noto Sans CJK TC",sans-serif;fill:#64748b}
+ .nc{font:400 15px/1 "Noto Sans CJK TC",sans-serif;fill:#64748b;text-anchor:middle}
+ .box{fill:#fff;stroke:#cbd5e1;stroke-width:1.5;rx:6}
+ .grey{fill:#e2e8f0;stroke:#cbd5e1;stroke-width:1.5;rx:6}
+ .panel{fill:#e2e8f0;stroke:#cbd5e1;stroke-width:1.5;rx:8}
+ .warm{fill:#fdebd8;stroke:#c2410c;stroke-width:2;rx:6}
+ .teal{fill:#e6f4f1;stroke:#0f766e;stroke-width:2;rx:6}
+ .ar{stroke:#475569;stroke-width:2;fill:none;marker-end:url(#a)}
+ .arb{stroke:#b45309;stroke-width:2.5;fill:none;marker-end:url(#o)}
+</style>
+<svg width="1740" height="1570" viewBox="0 0 1740 1570" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#475569"/></marker>
+<marker id="o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#b45309"/></marker>
+</defs>
+
+<!-- ───────── 建立索引 ───────── -->
+<text class="lbl" x="45" y="50">建立索引 · 定稿或上傳完成後執行一次</text>
+
+<rect class="grey" x="45" y="80" width="300" height="130"/>
+<text class="tc" x="195" y="134">逐字稿片段</text>
+<text class="sc" x="195" y="170">含說話者標籤</text>
+<path class="ar" d="M345 145 L406 145"/>
+
+<rect class="box" x="416" y="80" width="300" height="130"/>
+<text class="tc" x="566" y="134">切塊</text>
+<text class="sc" x="566" y="170">每塊約 400 字</text>
+<path class="ar" d="M716 145 L777 145"/>
+
+<rect class="box" x="787" y="80" width="300" height="130"/>
+<text class="tc" x="937" y="134">bge-m3</text>
+<text class="sc" x="937" y="170">1024 維向量</text>
+<path class="ar" d="M1087 145 L1148 145"/>
+
+<rect class="teal" x="1158" y="68" width="537" height="154"/>
+<text class="s" x="1186" y="112">chunks</text>
+<text class="n" x="1392" y="112">塊的原文</text>
+<text class="s" x="1186" y="155">vec_chunks</text>
+<text class="n" x="1392" y="155">向量 · user_id 分區</text>
+<text class="s" x="1186" y="198">fts_chunks</text>
+<text class="n" x="1392" y="198">全文 · trigram</text>
+
+<text class="n" x="45" y="262">向量算不出來的塊仍寫入 chunks 與 fts_chunks —— 關鍵字側照樣搜得到</text>
+<path d="M45 305 L1695 305" stroke="#e2e8f0" stroke-width="2"/>
+
+<!-- ───────── 檢索 ───────── -->
+<text class="lbl" x="45" y="372">檢索 · 每次提問時執行</text>
+
+<rect class="grey" x="455" y="400" width="830" height="150"/>
+<text class="t" x="487" y="446">search_meetings</text>
+<text class="s" x="487" y="488">query · tags? · date_from? · date_to?</text>
+<text class="s" x="1253" y="488" text-anchor="end">user_id</text>
+<text class="n" x="487" y="524">↑這些由 LLM 產生</text>
+<text class="n" x="1253" y="524" text-anchor="end">↑由 token 帶入，LLM 碰不到</text>
+<path class="ar" d="M870 550 L870 606"/>
+
+<rect class="warm" x="455" y="610" width="830" height="124"/>
+<text class="tc" x="870" y="660">標籤限縮候選會議</text>
+<text class="sc" x="870" y="700">沒帶標籤 = 不限制 · 篩不到 = 直接回空</text>
+
+<!-- 分流 -->
+<path d="M870 734 L870 772" stroke="#475569" stroke-width="2" fill="none"/>
+<path d="M445 772 L1295 772" stroke="#475569" stroke-width="2" fill="none"/>
+<path class="ar" d="M445 772 L445 822"/>
+<path class="ar" d="M1295 772 L1295 822"/>
+<rect x="770" y="758" width="200" height="28" fill="#fff"/>
+<text class="nc" x="870" y="780">兩側並行執行</text>
+
+<!-- 向量側 -->
+<rect class="panel" x="45" y="826" width="800" height="306"/>
+<text class="lbl" x="75" y="866">向量側 · 意思相近</text>
+<rect class="box" x="70" y="886" width="750" height="100"/>
+<text class="t" x="98" y="928">bge-m3 把問題轉成向量</text>
+<text class="s" x="98" y="962">與建索引時用同一個模型</text>
+<path class="ar" d="M445 986 L445 1016"/>
+<rect class="box" x="70" y="1020" width="750" height="96"/>
+<text class="t" x="98" y="1060">vec_chunks 最近鄰檢索</text>
+<text class="s" x="98" y="1094">L2 距離 · WHERE user_id · rowid IN 候選</text>
+
+<!-- 關鍵字側 -->
+<rect class="panel" x="895" y="826" width="800" height="306"/>
+<text class="lbl" x="925" y="866">關鍵字側 · 用詞精確</text>
+<rect class="box" x="920" y="886" width="750" height="100"/>
+<text class="t" x="948" y="928">中文取 3 字滑窗</text>
+<text class="s" x="948" y="962">健保署預算 → 健保署 / 保署預 / 署預算</text>
+<path class="ar" d="M1295 986 L1295 1016"/>
+<rect class="box" x="920" y="1020" width="750" height="96"/>
+<text class="t" x="948" y="1060">fts_chunks 全文檢索</text>
+<text class="s" x="948" y="1094">bm25 排序 · 少於 3 字改用子字串比對</text>
+
+<!-- 合流 -->
+<path d="M445 1132 L445 1180 L790 1180" stroke="#b45309" stroke-width="2.5" fill="none"/>
+<path class="arb" d="M790 1180 L790 1232"/>
+<path d="M1295 1132 L1295 1180 L950 1180" stroke="#b45309" stroke-width="2.5" fill="none"/>
+<path class="arb" d="M950 1180 L950 1232"/>
+<text class="nc" x="620" y="1168">各自的名次</text>
+<text class="nc" x="1120" y="1168">各自的名次</text>
+
+<rect class="warm" x="455" y="1236" width="830" height="150"/>
+<text class="tc" x="870" y="1286">RRF 合併兩份名次</text>
+<text class="sc" x="870" y="1326">分數 = Σ 1 / (60 + 名次)</text>
+<text class="nc" x="870" y="1362">只看名次，不必校正兩種不同的分數尺度</text>
+<path class="ar" d="M870 1386 L870 1440"/>
+
+<rect class="teal" x="455" y="1444" width="830" height="110"/>
+<text class="tc" x="870" y="1492">日期過濾 → 取前 6 筆 → 回給助理</text>
+<text class="sc" x="870" y="1528">每筆含 會議標題 · 日期 · 逐字稿片段</text>
+</svg>
