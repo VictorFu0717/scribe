@@ -102,4 +102,9 @@ async def build(user_id: str, meeting_id: str, kind: str = "flow",
         err = validate(code, kind)
         if err:
             raise ValueError(f"產生的 Mermaid 語法有誤:{err}")
-    return {"kind": kind, "code": code, "source": src}
+    out = {"kind": kind, "code": code, "source": src}
+    if src == "transcript":
+        # 逐字稿是口語、細節散落,畫出來比摘要差一截。明講出來,讓使用者知道還有更好的選項,
+        # 而不是以為「這個功能就只能畫成這樣」。
+        out["hint"] = "這場會議還沒有摘要,這張圖是直接讀逐字稿畫的。產生摘要後重畫會更準確。"
+    return out

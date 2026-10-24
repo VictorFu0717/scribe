@@ -119,8 +119,11 @@ async def _run_tool(name: str, args_str: str, user: str, events: list) -> str:
         # (那會浪費 token,而且 LLM 轉抄 Mermaid 很容易改壞語法)。
         events.append({"type": "diagram", "meeting_id": mid, **d})
         n = len([l for l in d["code"].splitlines() if l.strip()]) - 1
-        return (f"已產生 {d['kind']} 圖(依據{'摘要' if d['source']=='summary' else '逐字稿'},約 {n} 行)"
-                f"並顯示在使用者畫面上。請用一兩句話說明這張圖呈現了什麼,不要重複貼出原始碼。")
+        msg = (f"已產生 {d['kind']} 圖(依據{'摘要' if d['source']=='summary' else '逐字稿'},約 {n} 行)"
+               f"並顯示在使用者畫面上。請用一兩句話說明這張圖呈現了什麼,不要重複貼出原始碼。")
+        if d.get("hint"):   # 沒摘要時一併提醒,否則使用者不會知道還有更準的畫法
+            msg += f" 另外請告訴使用者:{d['hint']}"
+        return msg
     return f"未知工具:{name}"
 
 
