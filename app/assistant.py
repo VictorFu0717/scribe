@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app import config, db, llm, rag
+from app import config, db, diagram, llm, rag
 from app.auth import get_current_user
 
 router = APIRouter(tags=["assistant"])
@@ -52,6 +52,19 @@ TOOLS = [
                      "description": "只在帶有這些標籤的會議裡找(可選)。"
                                     "只能用系統提示中列出的既有標籤,不要自己發明。"}},
             "required": ["query"]}}},
+    {"type": "function", "function": {
+        "name": "draw_meeting_diagram",
+        "description": "把某場會議的內容畫成圖表(流程圖/關係圖/時間軸/心智圖)。"
+                       "使用者說「畫成流程圖」「整理成關係圖」「視覺化」時用。"
+                       "圖會直接顯示在畫面上,你不需要把圖的原始碼重複寫進回答裡。",
+        "parameters": {"type": "object", "properties": {
+            "meeting_id": {"type": "string", "description": "會議 id"},
+            "kind": {"type": "string", "enum": ["flow", "relation", "timeline", "mindmap"],
+                     "description": "flow=流程圖(步驟/決策) relation=關係圖(人事物關聯) "
+                                    "timeline=時間軸(里程碑) mindmap=心智圖(主題階層)。"
+                                    "使用者沒指定就依內容挑最合適的。"},
+            "focus": {"type": "string", "description": "只畫某個子主題(可選)"}},
+            "required": ["meeting_id"]}}},
 ]
 
 SYSTEM = (
@@ -65,7 +78,7 @@ SYSTEM = (
 )
 
 
-async def _run_tool(name: str, args_str: str, user: str) -> str:
+async def _run_tool(name: str, args_str: str, user: str, events: list) -> str:
     try:
         args = json.loads(args_str or "{}")
     except Exception:
@@ -96,6 +109,18 @@ async def _run_tool(name: str, args_str: str, user: str) -> str:
             rows = await db.search_transcripts(user, args.get("query", ""))   # 兩側都掛才退回
         rows = [{k: v for k, v in r.items() if k != "distance"} for r in rows]
         return json.dumps(rows, ensure_ascii=False) if rows else "(找不到相關會議)"
+    if name == "draw_meeting_diagram":
+        mid = args.get("meeting_id", "")
+        try:
+            d = await diagram.build(user, mid, args.get("kind", "flow"), args.get("focus"))
+        except Exception as e:
+            return f"畫圖失敗:{e}"
+        # 圖走自己的 SSE 事件直接給 App —— 不讓它回到 LLM 的上下文再被覆述一次
+        # (那會浪費 token,而且 LLM 轉抄 Mermaid 很容易改壞語法)。
+        events.append({"type": "diagram", "meeting_id": mid, **d})
+        n = len([l for l in d["code"].splitlines() if l.strip()]) - 1
+        return (f"已產生 {d['kind']} 圖(依據{'摘要' if d['source']=='summary' else '逐字稿'},約 {n} 行)"
+                f"並顯示在使用者畫面上。請用一兩句話說明這張圖呈現了什麼,不要重複貼出原始碼。")
     return f"未知工具:{name}"
 
 
@@ -150,8 +175,11 @@ async def assistant_chat(req: AssistantReq, user: str = Depends(get_current_user
                 # 記錄 assistant 的 tool_calls,再逐一執行、把結果餵回(訊息格式依後端)
                 messages.append(llm.assistant_tool_msg(content, calls))
                 for c in calls:
-                    result = await _run_tool(c["name"], c["arguments"], user)
+                    events: list = []
+                    result = await _run_tool(c["name"], c["arguments"], user, events)
                     messages.append(llm.tool_result_msg(c, result))
+                    for ev in events:       # 圖表等附加內容,獨立事件直接送給 App
+                        yield _sse(ev)
             # 迴圈用盡仍沒收斂
             yield _sse({"delta": "\n(已達工具呼叫上限)"})
         except Exception as ex:

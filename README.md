@@ -586,6 +586,7 @@ STREAM_BACKEND=paraformer python main.py         # 切回舊的輕量預覽
 - [x] 重建索引（`POST /meetings/{id}/reindex`、`POST /meetings/reindex`）
 - [x] 編輯逐字稿（`PUT /meetings/{id}/transcript`，整份覆寫 + 自動重建索引）
 - [x] 摘要進向量庫（`chunks.type` 區分 transcript / summary）
+- [x] 會議圖表（agent 工具 `draw_meeting_diagram`，產 Mermaid 由 App 渲染）
 - [x] **會議標籤**（使用者自訂、選填、可多個；助理據此縮小 RAG 檢索範圍）
 - [x] 更新會議（`PATCH /meetings/{id}`：標題 / 標籤）
 - [ ] 帳號審核制 + admin 管理（產品化時;register→待審→核准）

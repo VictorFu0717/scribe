@@ -175,6 +175,10 @@ EMBED_API_KEY = os.getenv("EMBED_API_KEY", "ollama")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "bge-m3")
 EMBED_DIM = int(os.getenv("EMBED_DIM", "1024"))
 RAG_CHUNK_CHARS = int(os.getenv("RAG_CHUNK_CHARS", "400"))   # 逐字稿切塊字元數
+
+# --- ⑦ 會議圖表(agent 工具 draw_meeting_diagram)---
+# 沒有摘要時退回逐字稿,截斷到這個長度(有摘要的話優先用摘要,畫出來準得多)。
+DIAGRAM_MAX_CHARS = int(os.getenv("DIAGRAM_MAX_CHARS", "6000"))
 # hybrid 檢索的 RRF 常數:score = Σ 1/(K + 名次)。K 越大 → 各來源的名次差異被壓平、越像投票;
 # 越小 → 越偏袒各自的第一名。60 是文獻慣用值。
 RAG_RRF_K = int(os.getenv("RAG_RRF_K", "60"))
