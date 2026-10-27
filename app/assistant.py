@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
@@ -56,15 +57,17 @@ TOOLS = [
         "name": "draw_meeting_diagram",
         "description": "把某場會議的內容畫成圖表(流程圖/關係圖/時間軸/心智圖)。"
                        "使用者說「畫成流程圖」「整理成關係圖」「視覺化」時用。"
+                       "**每次使用者要圖都要呼叫一次**:要換圖種就改 kind 再呼叫,"
+                       "不要因為剛剛畫過就省略。"
                        "圖會直接顯示在畫面上,你不需要把圖的原始碼重複寫進回答裡。",
         "parameters": {"type": "object", "properties": {
-            "meeting_id": {"type": "string", "description": "會議 id"},
+            "meeting_id": {"type": "string",
+                           "description": "會議 id。省略 = 目前/剛才在談的那場會議。"},
             "kind": {"type": "string", "enum": ["flow", "relation", "timeline", "mindmap"],
                      "description": "flow=流程圖(步驟/決策) relation=關係圖(人事物關聯) "
                                     "timeline=時間軸(里程碑) mindmap=心智圖(主題階層)。"
                                     "使用者沒指定就依內容挑最合適的。"},
-            "focus": {"type": "string", "description": "只畫某個子主題(可選)"}},
-            "required": ["meeting_id"]}}},
+            "focus": {"type": "string", "description": "只畫某個子主題(可選)"}}}}},
 ]
 
 SYSTEM = (
@@ -76,11 +79,17 @@ SYSTEM = (
     "- 若某場會議「摘要尚未產生」,改用 get_meeting_transcript 取逐字稿來回答,不要因為沒有摘要就放棄。\n"
     "- **不要把 meeting_id 念給使用者聽**(那是內部識別碼)。要指稱某場會議時用它的標題,"
     "或用「這場會議」「上週那場」這種自然說法。\n"
-    "- 回答精簡、切中重點,必要時條列。"
+    "- 回答精簡、切中重點,必要時條列。\n"
+    "- 要圖表時一律呼叫 draw_meeting_diagram,**絕對不要自己在回答裡寫 Mermaid 原始碼**"
+    "(App 不會把文字當成圖,使用者只會看到一堆看不懂的符號)。\n"
+    "- 使用者接著說「再畫成關係圖」「換一種圖」時,指的是**同一場會議的另一張圖**:"
+    "換個 kind 再呼叫一次工具就好,不要因為剛畫過就不呼叫,也不要回頭問是哪一場。\n"
+    "- 畫完圖後,在回答裡帶到那場會議的標題,後續追問才接得上。"
 )
 
 
-async def _run_tool(name: str, args_str: str, user: str, events: list) -> str:
+async def _run_tool(name: str, args_str: str, user: str, events: list,
+                    default_mid: str | None = None) -> str:
     try:
         args = json.loads(args_str or "{}")
     except Exception:
@@ -112,17 +121,30 @@ async def _run_tool(name: str, args_str: str, user: str, events: list) -> str:
         rows = [{k: v for k, v in r.items() if k != "distance"} for r in rows]
         return json.dumps(rows, ensure_ascii=False) if rows else "(找不到相關會議)"
     if name == "draw_meeting_diagram":
-        mid = args.get("meeting_id", "")
+        # 連續要第二張圖時模型常常漏掉 meeting_id(工具往返不會留在 App 的對話歷史裡),
+        # 與其反問使用者,不如依序退回:目前這場 → 最近一場。
+        mid = args.get("meeting_id") or default_mid or ""
+        if not mid:
+            ms = await db.list_meetings(user)
+            if not ms:
+                return "這個帳號還沒有任何會議,沒有東西可以畫"
+            mid = ms[0]["id"]
+        m = await db.get_meeting(user, mid)
+        if m is None:
+            return "找不到該會議"
         try:
             d = await diagram.build(user, mid, args.get("kind", "flow"), args.get("focus"))
         except Exception as e:
             return f"畫圖失敗:{e}"
         # 圖走自己的 SSE 事件直接給 App —— 不讓它回到 LLM 的上下文再被覆述一次
         # (那會浪費 token,而且 LLM 轉抄 Mermaid 很容易改壞語法)。
-        events.append({"type": "diagram", "meeting_id": mid, **d})
+        # id:同一場會議在一次對話裡可能畫很多張,App 要能分辨而不是互相覆蓋
+        events.append({"type": "diagram", "id": uuid4().hex[:12], "meeting_id": mid, **d})
         n = len([l for l in d["code"].splitlines() if l.strip()]) - 1
-        msg = (f"已產生 {d['kind']} 圖(依據{'摘要' if d['source']=='summary' else '逐字稿'},約 {n} 行)"
-               f"並顯示在使用者畫面上。請用一兩句話說明這張圖呈現了什麼,不要重複貼出原始碼。")
+        msg = (f"已產生「{m['title']}」的 {d['kind']} 圖"
+               f"(依據{'摘要' if d['source']=='summary' else '逐字稿'},約 {n} 行)"
+               f"並顯示在使用者畫面上。請用一兩句話說明這張圖呈現了什麼(提到會議標題),"
+               f"不要重複貼出原始碼。")
         if d.get("hint"):   # 沒摘要時一併提醒,否則使用者不會知道還有更準的畫法
             msg += f" 另外請告訴使用者:{d['hint']}"
         return msg
@@ -181,7 +203,8 @@ async def assistant_chat(req: AssistantReq, user: str = Depends(get_current_user
                 messages.append(llm.assistant_tool_msg(content, calls))
                 for c in calls:
                     events: list = []
-                    result = await _run_tool(c["name"], c["arguments"], user, events)
+                    result = await _run_tool(c["name"], c["arguments"], user, events,
+                                             default_mid=req.meeting_id)
                     messages.append(llm.tool_result_msg(c, result))
                     for ev in events:       # 圖表等附加內容,獨立事件直接送給 App
                         yield _sse(ev)

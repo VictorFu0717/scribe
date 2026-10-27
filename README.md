@@ -259,16 +259,23 @@ body: {"messages":[{"role","content"}...], "meeting_id":str|null, "language":"zh
 
 沒指定 `kind` 時由 LLM 依內容挑；可帶 `focus` 只畫某個子主題。
 
+`meeting_id` 可以省略，省略時依序退回 **body 的 `meeting_id` → 使用者最近一場會議**。
+這是為了接住「同一個對話框連續要第二張圖」：工具往返不會留在 App 送回來的對話歷史裡，
+模型第二次常常就說不出是哪一場——實測不帶 `meeting_id` 時，第二張圖 **4 次全軍覆沒**：
+不是反問「要哪一場」，就是自己在回答裡寫一段 Mermaid 當作畫好了（App 看到的就是「說畫好了但沒有圖」）。
+
 **圖走自己的 SSE 事件，不回到 LLM 的上下文：**
 
 ```json
-{"type":"diagram", "kind":"flow", "meeting_id":"...", "source":"summary",
+{"type":"diagram", "id":"8f3c1a0b2d44", "kind":"flow", "meeting_id":"...", "source":"summary",
  "code":"flowchart TD\n    n1[\"系統登入\"] --> n2{\"案件來源\"}\n ...",
  "hint":"這場會議還沒有摘要…"}
 ```
 
 > **App 端要做的**：收到這個事件就用 mermaid.js 渲染 `code`（WebView 載 mermaid.js
 > 最省事）。`hint` 只在沒摘要時出現，可做成提示橫幅。
+> **一次對話可以出現多個 diagram 事件**（「再畫成關係圖」會再來一張），每張用 `id` 區分——
+> 別拿 `meeting_id` 當 key，同一場會議的第二張圖會把第一張蓋掉。
 
 設計取捨：
 - **產 Mermaid 原始碼而非圖片** —— 純文字 LLM 直接生得出來，不必在推論路徑上掛瀏覽器；
