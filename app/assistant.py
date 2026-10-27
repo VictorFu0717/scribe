@@ -12,6 +12,7 @@ body: {"messages":[{"role","content"}...], "meeting_id":str|null, "language":"zh
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -151,6 +152,42 @@ async def _run_tool(name: str, args_str: str, user: str, events: list,
     return f"未知工具:{name}"
 
 
+# 模型「宣稱畫好了」的講法。實測 qwen3.8 會直接寫「已把這場會議畫成關係圖,圖已顯示在
+# 畫面上」卻根本沒呼叫工具 —— 光靠系統提示勸不動,只能在 server 這邊兜底。
+# 「同一句話裡」有宣稱詞 + 圖種詞才算數(句末標點就斷開),才不會把
+# 「上次那張流程圖的第三步是什麼」這種單純提到圖的回答也當成宣稱。
+_CLAIMED = re.compile(r"(已|幫你|為您|完成|好了|顯示在|呈現|如下)[^。\n！？!?]{0,60}"
+                      r"(流程圖|關係圖|關聯圖|心智圖|時間軸|圖表)")
+_KIND_WORDS = [("關係圖", "relation"), ("關聯圖", "relation"), ("心智圖", "mindmap"),
+               ("腦圖", "mindmap"), ("時間軸", "timeline"), ("時程", "timeline"),
+               ("流程圖", "flow")]
+
+
+def _guess_kind(*texts: str) -> str:
+    for t in texts:
+        for word, kind in _KIND_WORDS:
+            if word in (t or ""):
+                return kind
+    return "flow"
+
+
+async def _resolve_mid(user: str, default_mid: str | None) -> str:
+    if default_mid:
+        return default_mid
+    ms = await db.list_meetings(user)
+    return ms[0]["id"] if ms else ""
+
+
+async def _event_from_code(code: str, user: str, default_mid: str | None) -> dict | None:
+    """模型自己寫在回答裡的 Mermaid —— 語法過得了就直接當成圖送出去。"""
+    kind = diagram.kind_of(code)
+    if diagram.validate(code, kind):
+        return None
+    return {"type": "diagram", "id": uuid4().hex[:12],
+            "meeting_id": await _resolve_mid(user, default_mid),
+            "kind": kind, "code": code, "source": "inline"}
+
+
 class AssistantReq(BaseModel):
     messages: list[dict]
     meeting_id: str | None = None
@@ -183,21 +220,43 @@ async def assistant_chat(req: AssistantReq, user: str = Depends(get_current_user
     messages += [{"role": m.get("role", "user"), "content": m.get("content", "")}
                  for m in req.messages]
 
+    last_user = next((m.get("content", "") for m in reversed(req.messages)
+                      if m.get("role") == "user"), "")
+
     async def gen():
+        drew = False    # 這次請求有沒有真的送出圖
+        said = ""       # 使用者實際看到的文字(已濾掉 mermaid 原始碼)
         try:
             for _ in range(MAX_STEPS):
                 # 後端無關:llm.chat_stream 內部依 ollama/vllm 各自關 thinking + 帶 tools
                 content = ""
                 calls: list = []
+                filt = diagram.FenceFilter()
+
+                async def emit(parts):
+                    nonlocal drew, said
+                    for what, piece in parts:
+                        if what == "text":
+                            said += piece
+                            yield _sse({"delta": piece})
+                        else:   # 模型自己寫的 Mermaid:攔下來當圖,不要讓原始碼流出去
+                            d = await _event_from_code(piece, user, req.meeting_id)
+                            if d:
+                                drew = True
+                                yield _sse(d)
+
                 async for ev in llm.chat_stream(messages, tools=TOOLS, temperature=0.3):
                     if ev["type"] == "content":
                         content += ev["text"]
-                        yield _sse({"delta": ev["text"]})
+                        async for out in emit(filt.feed(ev["text"])):
+                            yield out
                     elif ev["type"] == "tool_calls":
                         calls = ev["calls"]
+                async for out in emit(filt.flush()):
+                    yield out
 
                 if not calls:
-                    return   # 沒有工具呼叫 → content 就是最終答案(已串流)
+                    break   # 沒有工具呼叫 → content 就是最終答案(已串流)
 
                 # 記錄 assistant 的 tool_calls,再逐一執行、把結果餵回(訊息格式依後端)
                 messages.append(llm.assistant_tool_msg(content, calls))
@@ -207,9 +266,19 @@ async def assistant_chat(req: AssistantReq, user: str = Depends(get_current_user
                                              default_mid=req.meeting_id)
                     messages.append(llm.tool_result_msg(c, result))
                     for ev in events:       # 圖表等附加內容,獨立事件直接送給 App
+                        drew = drew or ev.get("type") == "diagram"
                         yield _sse(ev)
-            # 迴圈用盡仍沒收斂
-            yield _sse({"delta": "\n(已達工具呼叫上限)"})
+            else:
+                yield _sse({"delta": "\n(已達工具呼叫上限)"})   # 迴圈用盡仍沒收斂
+
+            # 模型說「已經畫好了」卻沒真的畫 —— 補畫一張,不然 App 只會收到一句空話
+            if not drew and _CLAIMED.search(said):
+                events: list = []
+                args = json.dumps({"kind": _guess_kind(last_user, said)})
+                await _run_tool("draw_meeting_diagram", args, user, events,
+                                default_mid=req.meeting_id)
+                for ev in events:
+                    yield _sse(ev)
         except Exception as ex:
             yield _sse({"error": str(ex)})
         finally:

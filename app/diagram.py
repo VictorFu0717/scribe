@@ -69,6 +69,77 @@ def validate(code: str, kind: str) -> str | None:
     return None
 
 
+# Mermaid 標頭 → 我們的 kind(模型自己寫在回答裡時,用來回推是哪一種圖)
+_HEAD_KIND = [("flowchart", "flow"), ("graph", "relation"), ("timeline", "timeline"),
+               ("mindmap", "mindmap"), ("sequenceDiagram", "flow"),
+               ("erDiagram", "relation"), ("classDiagram", "relation"),
+               ("stateDiagram", "flow")]
+
+
+def kind_of(code: str) -> str:
+    first = (code.strip().splitlines() or [""])[0].strip()
+    for head, k in _HEAD_KIND:
+        if first.startswith(head):
+            return k
+    return "flow"
+
+
+class FenceFilter:
+    """串流文字過濾器:攔下 ```mermaid 區塊,其餘原樣放行。
+
+    模型有時候不呼叫工具,自己把 Mermaid 寫進回答裡(qwen3.8 實測幾乎每次都這樣)。
+    那段原始碼顯示在 App 上只是一堆亂碼,但它本身就能畫 —— 攔下來當成圖送出去,
+    比讓它流到畫面上好。只認明寫 ```mermaid 的圍欄;沒標記的交給呼叫端的補救路徑。
+
+    feed(text) / flush() → [("text", str) | ("code", str), ...]
+    """
+
+    def __init__(self):
+        self.buf = ""
+        self.in_code = False
+
+    def feed(self, text: str, final: bool = False) -> list:
+        self.buf += text
+        out: list = []
+        while True:
+            if self.in_code:
+                i = self.buf.find("```")
+                if i < 0:
+                    break
+                out.append(("code", self.buf[:i].strip()))
+                self.buf, self.in_code = self.buf[i + 3:], False
+                continue
+            i = self.buf.find("```")
+            if i < 0:                       # 尾端可能正在長出 ``` —— 留 2 個字元
+                keep = 0 if final else min(2, len(self.buf))
+                if len(self.buf) > keep:
+                    out.append(("text", self.buf[:len(self.buf) - keep]))
+                    self.buf = self.buf[len(self.buf) - keep:]
+                break
+            j = self.buf.find("\n", i)
+            if j < 0 and not final:         # 資訊行(```mermaid)還沒收完,等下一塊
+                if i:
+                    out.append(("text", self.buf[:i]))
+                    self.buf = self.buf[i:]
+                break
+            end = j + 1 if j >= 0 else len(self.buf)
+            if self.buf[i + 3:end].strip().lower() in ("mermaid", "mmd"):
+                if i:
+                    out.append(("text", self.buf[:i]))
+                self.buf, self.in_code = self.buf[end:], True
+                continue
+            out.append(("text", self.buf[:i + 3]))   # 不是 mermaid,圍欄原樣放行
+            self.buf = self.buf[i + 3:]
+        return out
+
+    def flush(self) -> list:
+        out = self.feed("", final=True)
+        if self.buf:
+            out.append(("code" if self.in_code else "text", self.buf.strip()))
+            self.buf, self.in_code = "", False
+        return out
+
+
 async def build(user_id: str, meeting_id: str, kind: str = "flow",
                 focus: str | None = None) -> dict:
     """產生一張圖。回傳 {"kind","code","source"};失敗時丟例外由呼叫端處理。"""

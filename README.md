@@ -259,10 +259,28 @@ body: {"messages":[{"role","content"}...], "meeting_id":str|null, "language":"zh
 
 沒指定 `kind` 時由 LLM 依內容挑；可帶 `focus` 只畫某個子主題。
 
-`meeting_id` 可以省略，省略時依序退回 **body 的 `meeting_id` → 使用者最近一場會議**。
-這是為了接住「同一個對話框連續要第二張圖」：工具往返不會留在 App 送回來的對話歷史裡，
-模型第二次常常就說不出是哪一場——實測不帶 `meeting_id` 時，第二張圖 **4 次全軍覆沒**：
-不是反問「要哪一場」，就是自己在回答裡寫一段 Mermaid 當作畫好了（App 看到的就是「說畫好了但沒有圖」）。
+#### 「同一個對話框要第二張圖」為什麼會失敗，以及怎麼擋
+
+工具往返（`tool_call` / `tool_result`）只活在單一次 HTTP 請求裡，不會回到 App 送回來的
+對話歷史。所以第二輪時模型已經不知道上一張畫的是哪一場，常見反應有兩種：反問「要哪一場」，
+或是**自己在回答裡寫一段 Mermaid 當成畫好了** —— App 收到的就是「說畫好了但沒有圖」。
+
+實測（qwen3.8，兩輪對話，每格 4 次）：
+
+| 第二輪的上下文 | 原本 | 現在 |
+|---|---|---|
+| 請求有帶 `meeting_id` | 0/4 | 4/4 |
+| 請求沒帶 `meeting_id` | 0/4 | 3/4 |
+| App 把 mermaid 也存進歷史 | 0/4 | 4/4 |
+
+三道防線，愈後面愈不依賴模型自律：
+
+1. **`meeting_id` 可省略** —— 省略時依序退回 body 的 `meeting_id` → 使用者最近一場會議，
+   不反問使用者。系統提示也要求畫完要在回答裡帶會議標題，後續追問才接得上。
+2. **`diagram.FenceFilter`** —— 串流時攔下 ` ```mermaid ` 區塊，不讓原始碼流到畫面上，
+   直接轉成 diagram 事件（`source:"inline"`）。模型自己寫的 Mermaid 本來就能畫。
+3. **宣稱偵測** —— 一次請求結束時若「沒送出任何圖」但回答裡出現「已把…畫成關係圖」這類
+   說法，server 自己補呼叫 `draw_meeting_diagram`，圖種從使用者的話推。
 
 **圖走自己的 SSE 事件，不回到 LLM 的上下文：**
 
@@ -271,6 +289,9 @@ body: {"messages":[{"role","content"}...], "meeting_id":str|null, "language":"zh
  "code":"flowchart TD\n    n1[\"系統登入\"] --> n2{\"案件來源\"}\n ...",
  "hint":"這場會議還沒有摘要…"}
 ```
+
+`source`：`summary`（依摘要畫，最準）／`transcript`（沒摘要，退回逐字稿，會附 `hint`）／
+`inline`（模型自己寫在回答裡、被 `FenceFilter` 攔下來的）。
 
 > **App 端要做的**：收到這個事件就用 mermaid.js 渲染 `code`（WebView 載 mermaid.js
 > 最省事）。`hint` 只在沒摘要時出現，可做成提示橫幅。
